@@ -337,7 +337,7 @@ void setUiColor() {
          }                 },
         {"Purple",
          [&]() {
-             FGCOLOR = 0xe01f;
+             FGCOLOR = 0xF800;  //0xe01f;
              BGCOLOR = 0x0000;
              ALCOLOR = 0xF800;
              odd_color = 0xf57f;
@@ -730,3 +730,4 @@ void saveConfigs() {
     EEPROM.commit();
     EEPROM.end();
 }
+
