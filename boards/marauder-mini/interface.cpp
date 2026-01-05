@@ -45,12 +45,7 @@ void _setBrightness(uint8_t brightval) {
         ledcWrite(TFT_BL, dutyCycle);
     }
 }
-/***************************************************************************************
-** Function name: getBattery()
-** location: display.cpp
-** Description:   Delivers the battery value from 1-100
-***************************************************************************************/
-int getBattery() { return 0; }
+
 
 /*********************************************************************
 ** Function: InputHandler

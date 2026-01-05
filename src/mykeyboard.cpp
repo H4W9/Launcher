@@ -4,8 +4,8 @@
 #include "settings.h"
 #include <globals.h>
 
-const int max_FM_size = tftWidth / (LW * FM) - 1;
-const int max_FP_size = tftWidth / (LW)-2;
+int max_FM_size = tftWidth / (LW * FM) - 1;
+int max_FP_size = tftWidth / (LW)-2;
 
 // QWERTY KEYSET
 const int qwerty_keyboard_width = 12;
@@ -736,14 +736,18 @@ String generalKeyboard(
 #endif
 
 #if defined(HAS_ENCODER) // T-Embed and T-LoRa-Pager
+#ifndef HAS_TOUCH
             LongPress = true;
-            if (check(SelPress) || selection_made) {
+#endif
+            // WaveSentry has Encoder and Touchscreen
+            // if touchscreen is pressed, ignore encoder input
+            if ((check(SelPress) || selection_made) && touchPoint.pressed == false) {
                 LongPress = false;
                 selection_made = true;
             } else {
                 /* NEXT "Btn" to move forward on th X axis (to the right) */
                 // if ESC is pressed while NEXT or PREV is received, then we navigate on the Y axis instead
-                if (check(NextPress)) {
+                if (check(NextPress) && touchPoint.pressed == false) {
                     if (EscPress) {
                         y++;
                     } else if ((x >= buttons_number - 1 && y <= -1) || (x >= KeyboardWidth - 1 && y >= 0)) {
@@ -764,7 +768,7 @@ String generalKeyboard(
                     redraw = true;
                 }
                 /* PREV "Btn" to move backwards on th X axis (to the left) */
-                if (check(PrevPress)) {
+                if (check(PrevPress) && touchPoint.pressed == false) {
                     if (EscPress) {
                         y--;
                     } else if (x <= 0) {
@@ -822,6 +826,8 @@ String generalKeyboard(
 /// This calls the QUERTY keyboard. Returns the user typed strings, return the ASCII ESC character
 /// if the operation was cancelled
 String keyboard(String current_text, int max_size, String textbox_title) {
+    max_FM_size = tftWidth / (LW * FM) - 1;
+    max_FP_size = tftWidth / (LW)-2;
     return generalKeyboard<qwerty_keyboard_height, qwerty_keyboard_width>(
         current_text, max_size, textbox_title, qwerty_keyset
     );
@@ -852,4 +858,25 @@ void checkReboot() {}
 ** Function name: getBattery()
 ** Description:   Delivers the battery value from 0-100
 ***************************************************************************************/
-int getBattery() { return 0; }
+int getBattery() {
+#ifdef ANALOG_BAT_PIN
+#ifndef ANALOG_BAT_MULTIPLIER
+#define ANALOG_BAT_MULTIPLIER 2.0f
+#endif
+    static bool adcInitialized = false;
+    if (!adcInitialized) {
+        pinMode(ANALOG_BAT_PIN, INPUT);
+        adcInitialized = true;
+    }
+    uint32_t adcReading = analogReadMilliVolts(ANALOG_BAT_PIN);
+    float actualVoltage = (float)adcReading * ANALOG_BAT_MULTIPLIER;
+    const float MIN_VOLTAGE = 3300.0f;
+    const float MAX_VOLTAGE = 4150.0f;
+    float percent = ((actualVoltage - MIN_VOLTAGE) / (MAX_VOLTAGE - (MIN_VOLTAGE + 50.0f))) * 100.0f;
+
+    if (percent < 0) percent = 1;
+    if (percent > 100) percent = 100;
+    return (int)percent;
+#endif
+    return 0;
+}

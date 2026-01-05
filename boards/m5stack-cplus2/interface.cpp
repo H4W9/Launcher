@@ -23,21 +23,6 @@ void _setup_gpio() {
     gpio_pullup_dis(GPIO_NUM_36);
 }
 
-/***************************************************************************************
-** Function name: getBattery()
-** location: display.cpp
-** Description:   Delivers the battery value from 1-100
-***************************************************************************************/
-int getBattery() {
-    uint8_t percent;
-    uint32_t volt = analogReadMilliVolts(GPIO_NUM_38);
-
-    float mv = volt;
-    percent = (mv - 3300) * 100 / (float)(4150 - 3350);
-
-    return (percent < 0) ? 0 : (percent >= 100) ? 100 : percent;
-}
-
 /*********************************************************************
 ** Function: setBrightness
 ** location: settings.cpp

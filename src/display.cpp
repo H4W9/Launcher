@@ -1156,23 +1156,33 @@ RESTART:
     if (refine) {
         refine = false;
         std::vector<Option> opt = {
-            {order_by == "downloads" ? "Order by name" : "Order by downloads",
+            {"Order by downloads",
              [&]() {
-                 order_by = order_by == "downloads" ? "name" : "downloads";
+                 order_by = "downloads";
                  refine = true;
-             }                                                                                          },
+             }, order_by == "downloads" ? FGCOLOR : NO_COLOR},
+            {"Order by name",
+             [&]() {
+                 order_by = "name";
+                 refine = true;
+             }, order_by == "name" ? FGCOLOR : NO_COLOR},
+            {"Order by latest",
+             [&]() {
+                 order_by = "date";
+                 refine = true;
+             }, order_by == "date" ? FGCOLOR : NO_COLOR},
             {star == true ? "Starred -> Off" : "Starred -> On",
              [&]() {
                  star = !star;
                  refine = true;
-             }                                                                                          },
+             }},
             {"Text Search",
              [&]() {
                  String _q = keyboard(query, 76, "Search Firmware");
                  if (_q != String(KEY_ESCAPE)) query = _q;
                  refine = true;
-             }                                                                                          },
-            {"Back to list",                                                   [&]() { refine = false; }}
+             }},
+            {"Back to list", [&]() { refine = false; }}
         };
         loopOptions(opt);
     }

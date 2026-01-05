@@ -30,7 +30,6 @@ def generate_build_flags(board_config):
     flags.append("-DUP_BTN=-1")
     flags.append("-DDW_BTN=-1")
     flags.append("-DBTN_ACT=LOW")
-    flags.append("-DBAT_PIN=4")
     flags.append("-DBTN_ALIAS='\"Sel\"'")
     flags.append("-DMINBRIGHT=190")
     flags.append("-DBACKLIGHT=21")

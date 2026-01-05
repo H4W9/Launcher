@@ -84,6 +84,11 @@ Things that needs to be done in next updates
 
 
 ## Latest Changelog
+* 2.6.5:
+     * [x] Added possibility to order by "Latest update"
+     * [x] Port to OpenSourceSRDLabs [WaveSentry and WaveSentry Pro ](https://opensourcesdrlab.com/products/aifw-wavesentry-esp32?VariantsId=10331)
+     * [x] Battery ADC measurement fix for Cardputer, Tdeck, StickCPlus2, T-Display S3, T-HMI
+
 * 2.6.4:
      * [x] Fixed CYD 3243S035R touchscreen rotation
      * [x] Fixed Marauder V7 screen issues
