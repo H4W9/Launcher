@@ -958,6 +958,9 @@ void drawBatteryStatus(uint8_t bat) {
 int loopOptions(std::vector<Option> &options, bool bright, uint16_t al, uint16_t bg, bool border, int index) {
     bool redraw = true;
     bool exit = false;
+#if defined(HAS_TOUCH)
+    bool escRequested = false; // set only by the explicit [ESC] label (touch, border==false)
+#endif
     log_i("Number of options: %d", options.size());
     int numOpt = options.size() - 1;
     Opt_Coord coord;
@@ -1003,7 +1006,7 @@ int loopOptions(std::vector<Option> &options, bool bright, uint16_t al, uint16_t
                     resetGlobals();
                     if (item.name == "") {
                         if (item.text == "ESC") {
-                            EscPress = true;
+                            escRequested = true;
                         } else {
                             if (item.text == "+") index = max_idx + 1;
                             if (item.text == "-") index = min_idx - 1;
@@ -1082,7 +1085,24 @@ int loopOptions(std::vector<Option> &options, bool bright, uint16_t al, uint16_t
             break;
         }
 
+#if defined(HAS_TOUCH)
+        // Full-screen list menus (border == false) draw their own explicit
+        // [ESC] label as the back target. The global top-left heat-map ESC zone
+        // (utils.cpp touchHeatMap: x < tftWidth/3 && y < 50) overlaps the first
+        // list rows on tall screens, and because check(EscPress) both polls the
+        // touch controller and consumes the flag, honouring it here makes the
+        // first couple of items impossible to select (they exit to the menu).
+        // So ignore the heat-map ESC for these menus; the [ESC] label still
+        // exits. Bordered pop-ups (no [ESC] label) keep the corner gesture.
+        if (border == false) {
+            if (escRequested || returnToMenu || exit) return -1;
+            EscPress = false; // swallow any stray heat-map ESC over the list rows
+        } else {
+            if (check(EscPress) || returnToMenu || exit) return -1;
+        }
+#else
         if (check(EscPress) || returnToMenu || exit) return -1;
+#endif
     }
     if (border) tft->fillScreen(BGCOLOR);
 #if defined(HAS_TOUCH)
