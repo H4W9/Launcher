@@ -322,15 +322,18 @@ RESTART:
 
     // Long Press Detection
     LongPressDetected = false;
-#if defined(PANCAKE) || defined(MARAUDERV8)
-    // Touch build: the button-style "is SelPress still held" test below does not
-    // work here. The touch layer emits presses but no reliable "released" event,
-    // so a quick tap leaves SelPress asserted and is mis-read as a long press
-    // (opening the folder's options menu instead of the folder itself). Instead
-    // poll the panel directly: clearing touchPoint.pressed and re-running
-    // InputHandler sets it back to true only while a finger is physically on the
-    // panel. Finger held past the threshold = long press (options); a quick tap
-    // that releases before the threshold = short press (open the folder).
+#if defined(HAS_TOUCH) && defined(DONT_USE_INPUT_TASK) && !defined(E_PAPER_DISPLAY)
+    // Touch build with inline input polling (pancake, Marauder V8/V4OG, CYD,
+    // NM-CYD-C5, elecrow, nesso...): the button-style "is SelPress still held"
+    // test below does not work here. The touch layer emits presses but no
+    // reliable "released" event, so a quick tap leaves SelPress asserted and is
+    // mis-read as a long press (opening the folder's options menu instead of the
+    // folder itself). Instead poll the panel directly: clearing touchPoint.pressed
+    // and re-running InputHandler sets it back to true only while a finger is
+    // physically on the panel. Finger held past the threshold = long press
+    // (options); a quick tap that releases first = short press (open the folder).
+    // Boards that drive input from a background task (and thus manage LongPress
+    // themselves) are intentionally excluded — they keep the button path below.
     {
         const uint32_t holdThreshold = 400; // ms the finger must stay down
         const uint32_t t0 = launcherMillis();
