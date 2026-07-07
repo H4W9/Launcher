@@ -13,9 +13,11 @@
 #include "onlineLauncher.h"
 #include "partition_install_layout.h"
 #include "partition_table_model.h"
+#include "ram_profile.h"
 #include "sd_functions.h"
 #include "settings.h"
 #include <globals.h>
+#include <memory>
 #include <vector>
 
 #include <SD.h>
@@ -484,7 +486,7 @@ String humanReadableSize(uint64_t bytes) {
     return String((bytes + 1073741823ULL) / 1073741824ULL) + " GB";
 }
 
-String listFiles(String folder) {
+String listFiles(const String &folder) {
     String returnText = "pa:" + folder + ":0\n";
     launcherConsolePrintln("Listing files stored on SD");
 
@@ -582,6 +584,9 @@ bool receiveBody(httpd_req_t *req, String &body, size_t maxSize = 8192) {
     body = "";
     body.reserve(req->content_len + 1);
     size_t remaining = req->content_len;
+    std::unique_ptr<uint8_t[]> buffGuard(new (std::nothrow) uint8_t[bufSize]); // on-demand, httpd task has a small stack
+    uint8_t *buff = buffGuard.get();
+    if (!buff) return false;
     while (remaining > 0) {
         int readLen =
             httpd_req_recv(req, reinterpret_cast<char *>(buff), remaining > bufSize ? bufSize : remaining);
@@ -802,11 +807,20 @@ bool streamMultipartUpload(httpd_req_t *req) {
     bool finishedFile = false;
     size_t written = 0;
     size_t remaining = req->content_len;
+    std::unique_ptr<uint8_t[]> buffGuard(new (std::nothrow) uint8_t[bufSize]); // on-demand, httpd task has a small stack
+    uint8_t *buff = buffGuard.get();
+    if (!buff) {
+        sendText(req, 500, "text/plain", "Out of memory");
+        return false;
+    }
 
     while (remaining > 0) {
         int readLen =
             httpd_req_recv(req, reinterpret_cast<char *>(buff), remaining > bufSize ? bufSize : remaining);
-        if (readLen <= 0) return false;
+        if (readLen <= 0) {
+            sendText(req, 500, "text/plain", "Upload receive failed");
+            return false;
+        }
         pending.insert(pending.end(), buff, buff + readLen);
         remaining -= readLen;
 
@@ -817,26 +831,51 @@ bool streamMultipartUpload(httpd_req_t *req) {
                 String headers;
                 headers.reserve(headerEnd);
                 for (int i = 0; i < headerEnd; ++i) headers += static_cast<char>(pending[i]);
+                String name = extractDispositionValue(headers, "name");
                 String filename = extractDispositionValue(headers, "filename");
                 pending.erase(pending.begin(), pending.begin() + headerEnd + 4);
-                if (filename.isEmpty()) continue;
-                if (!beginUploadTarget(file, filename)) return false;
+                if (filename.isEmpty()) {
+                    int boundaryAt = findBytes(pending, delimiter);
+                    if (boundaryAt < 0) break;
+                    if (name == "folder") {
+                        String folder;
+                        folder.reserve(boundaryAt);
+                        for (int i = 0; i < boundaryAt; ++i) folder += static_cast<char>(pending[i]);
+                        folder.trim();
+                        uploadFolder = folder.length() ? folder : "/";
+                    }
+                    pending.erase(pending.begin(), pending.begin() + boundaryAt + delimiter.length());
+                    continue;
+                }
+                if (!beginUploadTarget(file, filename)) {
+                    sendText(req, 500, "text/plain", "Unable to open upload target");
+                    return false;
+                }
                 inFile = true;
             }
 
             int boundaryAt = findBytes(pending, delimiter);
             if (boundaryAt >= 0) {
-                if (boundaryAt > 0 && !writeUploadData(file, pending.data(), boundaryAt, written))
+                if (boundaryAt > 0 && !writeUploadData(file, pending.data(), boundaryAt, written)) {
+                    sendText(req, 500, "text/plain", "Unable to write upload data");
                     return false;
+                }
                 written += boundaryAt;
                 pending.erase(pending.begin(), pending.begin() + boundaryAt + delimiter.length());
                 finishedFile = finishUploadTarget(file);
+                if (!finishedFile) {
+                    sendText(req, 500, "text/plain", "Unable to finish upload");
+                    return false;
+                }
                 break;
             }
 
             if (pending.size() > keep) {
                 size_t writeLen = pending.size() - keep;
-                if (!writeUploadData(file, pending.data(), writeLen, written)) return false;
+                if (!writeUploadData(file, pending.data(), writeLen, written)) {
+                    sendText(req, 500, "text/plain", "Unable to write upload data");
+                    return false;
+                }
                 written += writeLen;
                 pending.erase(pending.begin(), pending.begin() + writeLen);
             }
@@ -845,10 +884,17 @@ bool streamMultipartUpload(httpd_req_t *req) {
     }
 
     if (!finishedFile && inFile) {
-        if (!pending.empty() && !writeUploadData(file, pending.data(), pending.size(), written)) return false;
+        if (!pending.empty() && !writeUploadData(file, pending.data(), pending.size(), written)) {
+            sendText(req, 500, "text/plain", "Unable to write upload data");
+            return false;
+        }
         finishedFile = finishUploadTarget(file);
+        if (!finishedFile) {
+            sendText(req, 500, "text/plain", "Unable to finish upload");
+            return false;
+        }
     }
-    sendText(req, "text/plain", finishedFile ? "OK" : "No file");
+    sendText(req, finishedFile ? 200 : 400, "text/plain", finishedFile ? "OK" : "No file");
     return finishedFile;
 }
 
@@ -1043,6 +1089,13 @@ void sendFileDownload(httpd_req_t *req, const String &fileName) {
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     String disposition = "attachment; filename=\"" + fileName.substring(fileName.lastIndexOf('/') + 1) + "\"";
     httpd_resp_set_hdr(req, "Content-Disposition", disposition.c_str());
+    std::unique_ptr<uint8_t[]> buffGuard(new (std::nothrow) uint8_t[bufSize]); // on-demand, httpd task has a small stack
+    uint8_t *buff = buffGuard.get();
+    if (!buff) {
+        file.close();
+        sendText(req, 500, "text/plain", "Out of memory");
+        return;
+    }
     while (file.available()) {
         size_t readLen = file.read(buff, bufSize);
         if (httpd_resp_send_chunk(req, reinterpret_cast<const char *>(buff), readLen) != ESP_OK) break;
@@ -1099,6 +1152,13 @@ esp_err_t editfileHandler(httpd_req_t *req) {
         }
         httpd_resp_set_type(req, "text/plain");
         httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+        std::unique_ptr<uint8_t[]> buffGuard(new (std::nothrow) uint8_t[bufSize]); // on-demand, httpd task has a small stack
+        uint8_t *buff = buffGuard.get();
+        if (!buff) {
+            file.close();
+            sendText(req, 500, "text/plain", "Out of memory");
+            return ESP_OK;
+        }
         while (file.available()) {
             size_t len = file.read(buff, bufSize);
             httpd_resp_send_chunk(req, reinterpret_cast<const char *>(buff), len);
@@ -1460,7 +1520,8 @@ void stopWebServerAndWifi() {
 #endif
 }
 
-void startWebUi(String ssid, int encryptation, bool mode_ap) {
+void startWebUi(const String &ssid, int encryptation, bool mode_ap) {
+    RAM_LOG(mode_ap ? "startWebUi-ap-start" : "startWebUi-sta-start");
     file_size = 0;
 #ifndef HEADLESS
     getConfigs();
@@ -1470,20 +1531,24 @@ void startWebUi(String ssid, int encryptation, bool mode_ap) {
     config.webserverporthttp = default_webserverporthttp;
 
     if (launcherWifiIsConnected() && mode_ap) launcherWifiStop();
+    RAM_LOG("startWebUi-before-wifi");
     if (!ensureWifiConnected(ssid, encryptation, mode_ap)) return;
     vTaskDelay(pdMS_TO_TICKS(250));
 
     launcherConsolePrintln("Configuring Webserver ...");
+    RAM_LOG("before-webserver-start");
     server = launcherWebServerStart(config.webserverporthttp);
     if (!server) {
         launcherConsolePrintln("Failed to start Webserver");
         return;
     }
     configureWebServer();
+    RAM_LOG("after-webserver-configure");
     vTaskDelay(pdTICKS_TO_MS(500));
 
     startWebUiLoopCommon(mode_ap);
     stopWebServerAndWifi();
+    RAM_LOG("after-webui-stop");
 #ifndef HEADLESS
     tft->fillScreen(BGCOLOR);
 #endif

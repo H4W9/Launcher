@@ -8,6 +8,7 @@
 #include "littlefs_patch.h"
 #include "mykeyboard.h"
 #include "partition_table_model.h"
+#include "ram_profile.h"
 #include "sd_functions.h"
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
@@ -637,6 +638,7 @@ bool applyPartitionChanges(const LauncherPartitionTable &table) {
 } // namespace
 
 void partList() {
+    RAM_LOG("partList-start");
     int idx = 0;
     LauncherPartitionTable table;
     bool dirty = false;
@@ -992,9 +994,10 @@ void partitionCrawler() {
     }
 }
 
-bool attachPartition(String _from, String _to) {
+bool attachPartition(const String &_from, String _to) {
     size_t offset = 0;
     uint8_t bytes[16];
+    uint8_t buff[bufSize]; // on-demand copy buffer (was a resident global, see docs/milestone_2.md)
     launcherConsolePrintf("From: %s\nTo: %s\n", _from.c_str(), _to.c_str());
     File to = SDM.open(_to, FILE_READ);
     if (!to) {

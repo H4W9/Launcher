@@ -9,6 +9,7 @@
 #include "mykeyboard.h"
 #include "partition_install_layout.h"
 #include "partition_table_model.h"
+#include "ram_profile.h"
 #include "settings.h"
 #include <algorithm>
 #include <esp_app_format.h>
@@ -78,7 +79,7 @@ bool setupSdCard() {
 ** Function name: deleteFromSd
 ** Description:   delete file or folder
 ***************************************************************************************/
-bool deleteFromSd(String path) {
+bool deleteFromSd(const String &path) {
     File dir = SDM.open(path);
     if (!dir.isDirectory()) { return SDM.remove(path.c_str()); }
 
@@ -106,7 +107,7 @@ bool deleteFromSd(String path) {
 ** Function name: renameFile
 ** Description:   rename file or folder
 ***************************************************************************************/
-bool renameFile(String path, String filename) {
+bool renameFile(const String &path, const String &filename) {
     String newName = keyboard(filename, 76, "Type the new Name:");
     if (newName == "" || newName == String(KEY_ESCAPE) || newName == filename) { return false; }
     if (!setupSdCard()) {
@@ -128,7 +129,7 @@ bool renameFile(String path, String filename) {
 ** Function name: copyFile
 ** Description:   copy file address to memory
 ***************************************************************************************/
-bool copyFile(String path) {
+bool copyFile(const String &path) {
     if (!setupSdCard()) {
         // Serial.println("Fail to start SDCard");
         return false;
@@ -150,7 +151,7 @@ bool copyFile(String path) {
 ** Function name: pasteFile
 ** Description:   paste file to new folder
 ***************************************************************************************/
-bool pasteFile(String path) {
+bool pasteFile(const String &path) {
     // Tamanho do buffer para leitura/escrita
     const size_t bufferSize = 2048 * 2; // Ajuste conforme necessário para otimizar a performance
     uint8_t buffer[bufferSize];
@@ -288,6 +289,7 @@ void readFs(String &folder, std::vector<Option> &opt) {
 **  Where you choose what to do wuth your SD Files
 **********************************************************************/
 String loopSD(bool filePicker) {
+    RAM_LOG(filePicker ? "loopSD-picker-start" : "loopSD-start");
     // Function using loopOptions to store and handle files
     returnToMenu = false;
     fileToUse = ""; // resets global variable
@@ -303,7 +305,9 @@ String loopSD(bool filePicker) {
     bool bkf = false;
 RESTART:
     if (_Folder != Folder || read_fs) {
+        RAM_LOG("loopSD-before-readFs");
         readFs(Folder, options);
+        RAM_LOG("loopSD-after-readFs");
         if (options.size() == 0) return ""; // Failed reading SD card.
         _Folder = Folder;
         index = 0;
@@ -731,7 +735,7 @@ DONE:
 ** Function name: updateFromSD
 ** Description:   this function analyse the .bin and calls installFromSdDynamic
 ***************************************************************************************/
-void updateFromSD(String path) {
+void updateFromSD(const String &path) {
     uint8_t partitionEntry[LAUNCHER_PARTITION_ENTRY_SIZE];
     uint32_t app_size = 0;
     uint32_t app_offset = 0;
