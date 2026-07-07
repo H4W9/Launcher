@@ -157,18 +157,13 @@ void drawRangeSlider(
     tft->drawCentreString(" Confirm/Exit ", tftWidth / 2, barY + 16, 1);
 
     tft->setTextColor(ALCOLOR, BGCOLOR);
-#if defined(PANCAKE)
-    // Wide portrait panel: bunching the three hints on the left leaves them
-    // looking misaligned. Spread them into left/centre/right columns so they
+    
+    // Spread the three hints into left/centre/right columns so they
     // line up cleanly across the width (matches the touch footer layout).
     const int hintY = tftHeight - (LH * FP + 8);
-    tft->drawString("Prev/Next move", 8, hintY);
-    tft->drawCentreString("Sel ok", tftWidth / 2, hintY, 1);
-    tft->drawRightString("Esc cancel", tftWidth - 8, hintY, 1);
-#else
-    tft->setCursor(8, tftHeight - (LH * FP + 8));
-    tft->print("Prev/Next move  Sel ok  Esc cancel");
-#endif
+    tft->drawString("[Prev/Next move]", 8, hintY);
+    tft->drawCentreString("[Sel ok]", tftWidth / 2, hintY, 1);
+    tft->drawRightString("[Esc cancel]", tftWidth - 8, hintY, 1);
 }
 
 bool rangeSlider(
