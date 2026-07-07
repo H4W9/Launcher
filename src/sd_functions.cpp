@@ -322,7 +322,41 @@ RESTART:
 
     // Long Press Detection
     LongPressDetected = false;
-#ifndef E_PAPER_DISPLAY
+#if defined(PANCAKE)
+    // Touch build: the button-style "is SelPress still held" test below does not
+    // work here. The capacitive layer emits presses but no reliable "released"
+    // event, so a quick tap leaves SelPress asserted and is mis-read as a long
+    // press (opening the folder's options menu instead of the folder itself).
+    // Instead poll the panel directly: clearing touchPoint.pressed and re-running
+    // InputHandler sets it back to true only while a finger is physically on the
+    // glass. Finger held past the threshold = long press (options); a quick tap
+    // that releases before the threshold = short press (open the folder).
+    {
+        const uint32_t holdThreshold = 400; // ms the finger must stay down
+        const uint32_t t0 = launcherMillis();
+        LongPress = true; // force InputHandler to poll on every call (skip debounce)
+        while (launcherMillis() - t0 < holdThreshold) {
+            touchPoint.pressed = false;
+            InputHandler();
+            if (!touchPoint.pressed) break; // finger lifted → short press
+            vTaskDelay(15 / portTICK_PERIOD_MS);
+        }
+        if (launcherMillis() - t0 >= holdThreshold) LongPressDetected = true;
+        // On a long press the finger is usually still down; wait for release so
+        // the lingering touch doesn't immediately activate an item in the menu.
+        if (LongPressDetected) {
+            const uint32_t rel = launcherMillis();
+            while (launcherMillis() - rel < 1500) {
+                touchPoint.pressed = false;
+                InputHandler();
+                if (!touchPoint.pressed) break;
+                vTaskDelay(15 / portTICK_PERIOD_MS);
+            }
+        }
+        LongPress = false;
+        resetGlobals(); // drop any flags / heat-map side effects from polling
+    }
+#elif !defined(E_PAPER_DISPLAY)
     LongPress = true;
     SelPress = true; // it was just pressed
     LongPressTmp = launcherMillis();
