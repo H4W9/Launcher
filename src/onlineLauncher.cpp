@@ -859,6 +859,266 @@ bool checkForUpdates() {
     return true;
 }
 
+/***************************************************************************************
+** Function name: launcherBootloaderFlashOffset
+** Description:   Flash address of the second-stage bootloader for the running chip,
+**               taken straight from the IDF sdkconfig (CONFIG_BOOTLOADER_OFFSET_IN_FLASH).
+***************************************************************************************/
+static uint32_t launcherBootloaderFlashOffset() {
+#ifdef CONFIG_BOOTLOADER_OFFSET_IN_FLASH
+    return CONFIG_BOOTLOADER_OFFSET_IN_FLASH;
+#elif CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S2
+    return 0x1000;
+#elif CONFIG_IDF_TARGET_ESP32P4 || CONFIG_IDF_TARGET_ESP32C5
+    return 0x2000;
+#else
+    return 0x0;
+#endif
+}
+
+// Streams one HTTP source into the merged image, tracking the running write
+// position so gaps between components can be padded with 0xFF (erased flash).
+// Optionally snapshots a window of the stream (captureBuf/Start/Len) so the
+// embedded partition table of a factory image can be read without seeking back.
+struct MergedDownloadContext {
+    File *file;
+    size_t *pos;
+    size_t sourceExpected;
+    size_t sourceWritten;
+    long progressTick;
+    LauncherHttpResponse *response;
+    uint8_t *captureBuf;
+    size_t captureStart;
+    size_t captureLen;
+};
+
+static bool mergedDownloadCb(const uint8_t *data, size_t len, void *ctx) {
+    MergedDownloadContext *d = static_cast<MergedDownloadContext *>(ctx);
+    if (!d || !d->file) return false;
+
+    if (d->sourceExpected == 0 && d->response && d->response->content_length > 0) {
+        d->sourceExpected = static_cast<size_t>(d->response->content_length);
+        progressHandler(0, d->sourceExpected);
+    }
+
+    const size_t absStart = *d->pos; // absolute file offset this chunk lands at
+
+    size_t totalWrote = 0;
+    constexpr size_t sdWriteChunk = 512;
+    while (totalWrote < len) {
+        const size_t part = min(sdWriteChunk, len - totalWrote);
+        if (d->file->write(data + totalWrote, part) != part) return false;
+        totalWrote += part;
+    }
+    d->sourceWritten += totalWrote;
+    *d->pos += totalWrote;
+
+    // Snapshot the requested window (e.g. the partition table at 0x8000) as it
+    // streams by, so callers can parse it without reopening/seeking the file.
+    if (d->captureBuf && d->captureLen) {
+        const size_t capEnd = d->captureStart + d->captureLen;
+        const size_t s = max(absStart, d->captureStart);
+        const size_t e = min(absStart + len, capEnd);
+        if (s < e) memcpy(d->captureBuf + (s - d->captureStart), data + (s - absStart), e - s);
+    }
+
+    if (d->sourceExpected > 0) {
+        if (d->progressTick >= 10) {
+            d->file->flush();
+            vTaskDelay(pdMS_TO_TICKS(2));
+            progressHandler(d->sourceWritten, d->sourceExpected);
+            vTaskDelay(pdMS_TO_TICKS(2));
+            d->progressTick = 0;
+        } else {
+            d->progressTick++;
+        }
+    }
+    return true;
+}
+
+// Pads the merged file with 0xFF from the current write position up to `target`.
+static bool padMergedFile(File &file, size_t &pos, size_t target) {
+    if (pos > target) return false; // components overlap: malformed manifest
+    uint8_t ff[256];
+    memset(ff, 0xFF, sizeof(ff));
+    while (pos < target) {
+        const size_t chunk = min(sizeof(ff), target - pos);
+        if (file.write(ff, chunk) != chunk) return false;
+        pos += chunk;
+    }
+    return true;
+}
+
+// Downloads a single source URL into `file` at absolute flash `offset`, padding
+// the preceding gap with 0xFF. Only the firmware/app source is routed through the
+// LauncherHub proxy (so the backend can count the download); bootloader, partitions
+// and data are fetched directly from their source URLs. When captureBuf is set, the
+// window [captureStart, captureStart+captureLen) of the merged image is snapshotted.
+static bool mergeSourceIntoFile(
+    File &file, size_t &pos, size_t offset, const String &fid, const String &sourceUrl, bool useProxy,
+    uint8_t *captureBuf = nullptr, size_t captureStart = 0, size_t captureLen = 0
+) {
+    if (sourceUrl.isEmpty()) return false;
+    if (!padMergedFile(file, pos, offset)) {
+        launcherConsolePrintf(
+            "Merge: overlap while placing source at 0x%06X (pos 0x%06X)\n", (unsigned)offset, (unsigned)pos
+        );
+        return false;
+    }
+    String url = sourceUrl;
+    if (!url.startsWith("https://")) url = M5_SERVER_PATH + url;
+    if (useProxy && !fid.isEmpty()) url = "https://api.launcherhub.net/download?fid=" + fid + "&file=" + url;
+
+    LauncherHttpResponse resp;
+    MergedDownloadContext ctx = {&file, &pos, 0, 0, 0, &resp, captureBuf, captureStart, captureLen};
+    pauseInputHandlerTask();
+    bool ok =
+        launcherHttpGetStream(url.c_str(), mergedDownloadCb, &ctx, &resp, "HWID", launcherWifiMac().c_str());
+    file.flush();
+    resumeInputHandlerTask();
+
+    if (!ok || resp.status != 200) return false;
+    if (resp.content_length > 0 && ctx.sourceWritten != (size_t)resp.content_length) return false;
+    return true;
+}
+
+// Scans a raw partition table blob and returns the flash offset of the first data
+// partition (type byte == 0x01), or 0 if none is found. Used to locate where the
+// separate data image must go inside a factory (merged) firmware.
+static uint32_t firstDataPartitionOffsetFromTable(const uint8_t *table, size_t len) {
+    for (size_t i = 0; i + LAUNCHER_PARTITION_ENTRY_SIZE <= len; i += LAUNCHER_PARTITION_ENTRY_SIZE) {
+        const uint8_t *e = table + i;
+        if (e[0] != 0xAA || e[1] != 0x50) break;  // reached end / padding
+        if (e[0x02] == 0x01 && e[0x03] > 0x079) { // type == data, subtype FAT, SPIFFS or LittleFS
+            return (uint32_t)e[0x04] | ((uint32_t)e[0x05] << 8) | ((uint32_t)e[0x06] << 16) |
+                   ((uint32_t)e[0x07] << 24);
+        }
+    }
+    return 0;
+}
+
+/***************************************************************************************
+** Function name: downloadSplitFirmware
+** Description:   Assembles a multi-source firmware into a single merged .bin on the SD
+**               card, so updateFromSD can flash it like a normal image. Handles two
+**               layouts:
+**                 - split : separate bootloader + partitions + app [+ data], each
+**                           placed at its manifest flash offset.
+**                 - merged: firmware is a full factory image flashed at 0x0; a separate
+**                           data image is appended at the offset declared inside the
+**                           factory image's embedded partition table (0x8000).
+***************************************************************************************/
+static bool downloadSplitFirmware(
+    const String &fid, JsonObject install, const String &filePath, const String &folder,
+    const String &version, bool autoAdvance
+) {
+    JsonObject sources = install["sources"].as<JsonObject>();
+    String blUrl = sources["bootloader"].as<String>();
+    String partUrl = sources["partitions"].as<String>();
+    String fwUrl = sources["firmware"].as<String>();
+    String dataUrl = sources["data"].as<String>();
+
+    // A merged/factory firmware ships bootloader+partitions+app inside a single image
+    // and has no separate bootloader/partitions sources.
+    const bool mergedFirmware = blUrl.isEmpty() && partUrl.isEmpty();
+    bool hasData = !dataUrl.isEmpty();
+
+    // App flash offset: prefer install.app.flash_offset, then the app/ota partition
+    // entry, finally the conventional 0x10000. Data offset comes from the manifest when
+    // present; for merged images it is discovered from the embedded partition table.
+    uint32_t appOffset = install["app"]["flash_offset"] | 0;
+    uint32_t dataOffset = 0;
+    for (JsonObject part : install["partitions"].as<JsonArray>()) {
+        String type = part["type"].as<String>();
+        String subtype = part["subtype"].as<String>();
+        if (type == "app" && subtype == "ota" && appOffset == 0) {
+            appOffset = part["flash_offset"] | 0;
+        } else if (type == "data" && dataOffset == 0) {
+            dataOffset = part["flash_offset"] | 0;
+        }
+    }
+    if (appOffset == 0) appOffset = 0x10000;
+
+    const uint32_t blOffset = launcherBootloaderFlashOffset();
+    const uint32_t partOffset = LAUNCHER_PARTITION_TABLE_OFFSET; // 0x8000
+
+    File file = SDM.open(filePath, FILE_WRITE);
+    if (!file) {
+        displayRedStripe("Fail creating file.");
+        launcherDelayMs(2000);
+        return false;
+    }
+
+    size_t pos = 0;
+    bool ok = true;
+
+    if (mergedFirmware) {
+        // Factory image goes to 0x0. Snapshot the embedded partition table (0x8000) as
+        // it streams by so we can locate the data partition afterwards.
+        uint8_t ptable[LAUNCHER_PARTITION_TABLE_SIZE];
+        memset(ptable, 0xFF, sizeof(ptable));
+        displayRedStripe("Firmware..");
+        ok = mergeSourceIntoFile(
+            file, pos, 0x0, fid, fwUrl, true, hasData ? ptable : nullptr, partOffset, sizeof(ptable)
+        );
+        if (ok && hasData) {
+            if (dataOffset == 0) dataOffset = firstDataPartitionOffsetFromTable(ptable, sizeof(ptable));
+            if (dataOffset == 0 || dataOffset < pos) {
+                launcherConsolePrintf(
+                    "Merge: could not resolve data partition offset (0x%06X)\n", (unsigned)dataOffset
+                );
+                ok = false;
+            } else {
+                displayRedStripe("Data..");
+                ok = mergeSourceIntoFile(file, pos, dataOffset, fid, dataUrl, false);
+            }
+        }
+    } else {
+        // Split image: place each component at its own flash offset.
+        if (ok && !blUrl.isEmpty()) {
+            displayRedStripe("Bootloader..");
+            ok = mergeSourceIntoFile(file, pos, blOffset, fid, blUrl, false);
+        }
+        if (ok && !partUrl.isEmpty()) {
+            displayRedStripe("Partitions..");
+            ok = mergeSourceIntoFile(file, pos, partOffset, fid, partUrl, false);
+        }
+        if (ok) {
+            displayRedStripe("Firmware..");
+            ok = mergeSourceIntoFile(file, pos, appOffset, fid, fwUrl, true);
+        }
+        if (ok && hasData) {
+            if (dataOffset == 0) {
+                launcherConsolePrintln("Merge: split firmware missing data flash offset");
+                ok = false;
+            } else {
+                displayRedStripe("Data..");
+                ok = mergeSourceIntoFile(file, pos, dataOffset, fid, dataUrl, false);
+            }
+        }
+    }
+    file.flush();
+    file.close();
+
+    if (!ok) {
+        SDM.remove(filePath);
+        displayRedStripe("Download FAILED");
+        if (autoAdvance) launcherDelayMs(1500);
+        else
+            while (!check(SelPress)) yield();
+        return false;
+    }
+
+    progressHandler(100, 100);
+    launcherConsolePrintln("Merged firmware assembled..");
+    saveDownloadedFirmware(folder, fid, version);
+    displayRedStripe(" Downloaded ");
+    if (autoAdvance) launcherDelayMs(1000);
+    else
+        while (!check(SelPress)) yield();
+    return true;
+}
+
 void downloadFirmware(
     const String &fid, String file_url, String fileName, String folder, const String &version,
     bool autoAdvance
@@ -881,7 +1141,7 @@ void downloadFirmware(
     if (folder_name.length() > 2) {
         if (!SDM.exists(folder_name)) {
             if (!SDM.mkdir(folder_name)) {
-                log_i("Download: Couldn't create folder '%s'\n", folder_name.c_str());
+                launcherConsolePrintf("Download: Couldn't create folder '%s'\n", folder_name.c_str());
                 displayRedStripe("Can't create: '" + folder_name + "'");
                 launcherDelayMs(2000);
                 return;
@@ -889,11 +1149,33 @@ void downloadFirmware(
         }
     }
     String filePath = folder + fileName + ".bin";
+
+    // Some firmwares need assembling before they can be flashed from SD:
+    //   - split : separate bootloader + partitions + app [+ data] sources.
+    //   - merged: a factory image plus a separate data (filesystem) image.
+    // In both cases build one merged .bin; otherwise fall through to a plain download.
+    if (!fid.isEmpty() && !version.isEmpty()) {
+        JsonDocument detail(launcherJsonAllocator());
+        String infoUrl =
+            "https://api.launcherhub.net/firmwares?fid=" + fid + "&version=" + encodeQueryValue(version);
+        if (getInfo(infoUrl, detail)) {
+            JsonObject install = detail["version"]["install"].as<JsonObject>();
+            JsonObject sources = install["sources"].as<JsonObject>();
+            bool hasBootAndParts = !sources["bootloader"].isNull() && !sources["partitions"].isNull();
+            bool hasSeparateData = !sources["data"].isNull();
+            if (!sources.isNull() && (hasBootAndParts || hasSeparateData)) {
+                downloadSplitFirmware(fid, install, filePath, folder, version, autoAdvance);
+                wakeUpScreen();
+                return;
+            }
+        }
+    }
+
     File file;
 retry:
     file = SDM.open(filePath, FILE_WRITE);
     if (!file) {
-        log_i("Download: Couldn't create file %s", filePath.c_str());
+        launcherConsolePrintf("Download: Couldn't create file %s", filePath.c_str());
         displayRedStripe("Fail creating file.");
         launcherDelayMs(2000);
         return;
