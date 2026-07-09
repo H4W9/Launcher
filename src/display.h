@@ -47,6 +47,7 @@ uint16_t getComplementaryColor(uint16_t color);
 void displayRedStripe(
     const String &text, uint16_t fgcolor = getComplementaryColor(BGCOLOR), uint16_t bgcolor = ALCOLOR
 );
+void displayError(String txt, bool waitKeyPress = false); // Red Stripe + wait/delay
 
 void progressHandler(size_t progress, size_t total);
 

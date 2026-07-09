@@ -33,8 +33,7 @@ String generateAppNum(const String &sdFilepath) {
     uint32_t crc = 0xFFFFFFFF;
     for (char c : sdFilepath) {
         crc ^= (uint8_t)c;
-        for (int i = 0; i < 8; i++)
-            crc = (crc >> 1) ^ (0xEDB88320u * (crc & 1));
+        for (int i = 0; i < 8; i++) crc = (crc >> 1) ^ (0xEDB88320u * (crc & 1));
     }
     crc ^= 0xFFFFFFFF;
     char buf[9];
@@ -199,8 +198,7 @@ String findAppNumByFilepath(const String &sdFilepath) {
     if (arr.isNull()) return "";
 
     for (JsonObject entry : arr) {
-        if (entry["filepath"].as<String>() == sdFilepath)
-            return entry["appNum"].as<String>();
+        if (entry["filepath"].as<String>() == sdFilepath) return entry["appNum"].as<String>();
     }
     return "";
 }
@@ -216,8 +214,7 @@ String findAppNumByPartitionLabel(const String &partitionLabel) {
         JsonArray dataArr = entry["data"].as<JsonArray>();
         if (dataArr.isNull()) continue;
         for (JsonObject dataEntry : dataArr) {
-            if (dataEntry["label"].as<String>() == partitionLabel)
-                return entry["appNum"].as<String>();
+            if (dataEntry["label"].as<String>() == partitionLabel) return entry["appNum"].as<String>();
         }
     }
     return "";
@@ -263,6 +260,17 @@ static bool resolveDataRegion(const char *label, uint32_t &flashOffset, uint32_t
     return true;
 }
 
+static String backupFail(const char *label) {
+    displayError("Backup failed: " + String(label));
+    return "";
+}
+
+// Same idea for the restore paths below.
+static bool restoreFail(const char *label) {
+    displayError("Restore failed: " + String(label));
+    return false;
+}
+
 String backupPartition(const String &appNum, const char *partitionLabel, const char *type) {
     RAM_LOG("backupPartition-start");
     if (!setupSdCard()) return "";
@@ -277,25 +285,16 @@ String backupPartition(const String &appNum, const char *partitionLabel, const c
 
     uint32_t flashOffset = 0;
     uint32_t regionSize = 0;
-    if (!resolveDataRegion(partitionLabel, flashOffset, regionSize)) {
-        displayRedStripe((String("Backup failed: ") + partitionLabel).c_str());
-        launcherDelayMs(2500);
-        return "";
-    }
+    if (!resolveDataRegion(partitionLabel, flashOffset, regionSize)) return backupFail(partitionLabel);
 
     File outFile = SDM.open(outPath, FILE_WRITE);
-    if (!outFile) {
-        displayRedStripe((String("Backup failed: ") + partitionLabel).c_str());
-        launcherDelayMs(2500);
-        return "";
-    }
+    if (!outFile) return backupFail(partitionLabel);
 
     HeapBuffer buf = makeInternalBuffer(kBackupBufferSize);
     if (!buf) {
         outFile.close();
         SDM.remove(outPath);
-        displayRedStripe("Backup failed: no RAM");
-        launcherDelayMs(2500);
+        displayError("Backup failed: no RAM");
         return "";
     }
     size_t written = 0;
@@ -311,16 +310,12 @@ String backupPartition(const String &appNum, const char *partitionLabel, const c
         if (err != ESP_OK) {
             outFile.close();
             SDM.remove(outPath);
-            displayRedStripe((String("Backup failed: ") + partitionLabel).c_str());
-            launcherDelayMs(2500);
-            return "";
+            return backupFail(partitionLabel);
         }
         if (outFile.write(buf.get(), chunk) != chunk) {
             outFile.close();
             SDM.remove(outPath);
-            displayRedStripe((String("Backup failed: ") + partitionLabel).c_str());
-            launcherDelayMs(2500);
-            return "";
+            return backupFail(partitionLabel);
         }
         written += chunk;
         progressHandler(written, total);
@@ -328,8 +323,7 @@ String backupPartition(const String &appNum, const char *partitionLabel, const c
     outFile.close();
 
     updateInstalledBackupPath(appNum, String(partitionLabel), outPath);
-    displayRedStripe("Backup saved");
-    launcherDelayMs(1500);
+    displayError("Backup saved");
     RAM_LOG("backupPartition-end");
     return outPath;
 }
@@ -351,22 +345,16 @@ bool restorePartitionFromBackup(const char *partitionLabel, const char *backupFi
     if (!setupSdCard()) return false;
 
     File inFile = SDM.open(backupFilePath, FILE_READ);
-    if (!inFile) {
-        displayRedStripe((String("Restore failed: ") + partitionLabel).c_str());
-        launcherDelayMs(2500);
-        return false;
-    }
+    if (!inFile) return restoreFail(partitionLabel);
 
     size_t fileSize = inFile.size();
     if (fileSize == 0) {
         inFile.close();
-        displayRedStripe((String("Restore failed: ") + partitionLabel).c_str());
-        launcherDelayMs(2500);
-        return false;
+        return restoreFail(partitionLabel);
     }
 
-    const esp_partition_t *part = esp_partition_find_first(
-        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, partitionLabel);
+    const esp_partition_t *part =
+        esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, partitionLabel);
     if (!part) {
         inFile.close();
         log_w("restorePartitionFromBackup: partition '%s' not found on device, skipping", partitionLabel);
@@ -374,17 +362,13 @@ bool restorePartitionFromBackup(const char *partitionLabel, const char *backupFi
     }
     if (fileSize > part->size) {
         inFile.close();
-        displayRedStripe((String("Restore failed: ") + partitionLabel).c_str());
-        launcherDelayMs(2500);
-        return false;
+        return restoreFail(partitionLabel);
     }
 
     esp_err_t err = esp_partition_erase_range(part, 0, part->size);
     if (err != ESP_OK) {
         inFile.close();
-        displayRedStripe((String("Restore failed: ") + partitionLabel).c_str());
-        launcherDelayMs(2500);
-        return false;
+        return restoreFail(partitionLabel);
     }
 
     prog_handler = 1;
@@ -394,8 +378,7 @@ bool restorePartitionFromBackup(const char *partitionLabel, const char *backupFi
     HeapBuffer buf = makeInternalBuffer(kBackupBufferSize);
     if (!buf) {
         inFile.close();
-        displayRedStripe("Restore failed: no RAM");
-        launcherDelayMs(2500);
+        displayError("Restore failed: no RAM");
         return false;
     }
     size_t written = 0;
@@ -403,23 +386,18 @@ bool restorePartitionFromBackup(const char *partitionLabel, const char *backupFi
         size_t chunk = min(kBackupBufferSize, fileSize - written);
         if (inFile.read(buf.get(), chunk) != (int)chunk) {
             inFile.close();
-            displayRedStripe((String("Restore failed: ") + partitionLabel).c_str());
-            launcherDelayMs(2500);
-            return false;
+            return restoreFail(partitionLabel);
         }
         err = esp_partition_write(part, written, buf.get(), chunk);
         if (err != ESP_OK) {
             inFile.close();
-            displayRedStripe((String("Restore failed: ") + partitionLabel).c_str());
-            launcherDelayMs(2500);
-            return false;
+            return restoreFail(partitionLabel);
         }
         written += chunk;
         progressHandler(written, fileSize);
     }
     inFile.close();
-    displayRedStripe("Data restored");
-    launcherDelayMs(1500);
+    displayError("Data restored");
     RAM_LOG("restorePartition-end");
     return true;
 }
@@ -431,25 +409,18 @@ bool restorePartitionFromBackupDirect(
     if (!setupSdCard()) return false;
 
     File inFile = SDM.open(backupFilePath, FILE_READ);
-    if (!inFile) {
-        displayRedStripe((String("Restore failed: ") + partitionLabel).c_str());
-        launcherDelayMs(2500);
-        return false;
-    }
+    if (!inFile) return restoreFail(partitionLabel);
 
     size_t fileSize = inFile.size();
     if (fileSize == 0 || fileSize > flashSize) {
         inFile.close();
-        displayRedStripe((String("Restore failed: ") + partitionLabel).c_str());
-        launcherDelayMs(2500);
-        return false;
+        return restoreFail(partitionLabel);
     }
 
     HeapBuffer buf = makeInternalBuffer(kBackupBufferSize);
     if (!buf) {
         inFile.close();
-        displayRedStripe("Restore failed: no RAM");
-        launcherDelayMs(2500);
+        displayError("Restore failed: no RAM");
         return false;
     }
     size_t written = 0;
@@ -466,33 +437,26 @@ bool restorePartitionFromBackupDirect(
             esp_err_t err = esp_flash_erase_region(nullptr, addr, kBackupBufferSize);
             if (err != ESP_OK) {
                 inFile.close();
-                displayRedStripe((String("Restore failed: ") + partitionLabel).c_str());
-                launcherDelayMs(2500);
-                return false;
+                return restoreFail(partitionLabel);
             }
         }
 
         if (inFile.read(buf.get(), chunk) != (int)chunk) {
             inFile.close();
-            displayRedStripe((String("Restore failed: ") + partitionLabel).c_str());
-            launcherDelayMs(2500);
-            return false;
+            return restoreFail(partitionLabel);
         }
 
         esp_err_t err = esp_flash_write(nullptr, buf.get(), addr, chunk);
         if (err != ESP_OK) {
             inFile.close();
-            displayRedStripe((String("Restore failed: ") + partitionLabel).c_str());
-            launcherDelayMs(2500);
-            return false;
+            return restoreFail(partitionLabel);
         }
 
         written += chunk;
         progressHandler(written, fileSize);
     }
     inFile.close();
-    displayRedStripe("Data restored");
-    launcherDelayMs(1500);
+    displayError("Data restored");
     RAM_LOG("restorePartitionDirect-end");
     return true;
 }

@@ -5,8 +5,8 @@
 #include "idf/idf_update.h"
 #include "idf/idf_web_server.h"
 #include "idf/idf_wifi.h"
-#include "install_shared.h"
 #include "idf/launcher_platform.h"
+#include "install_shared.h"
 #include "littlefs_patch.h"
 #include "mykeyboard.h"
 #include "nvs.h"
@@ -108,9 +108,8 @@ WebInstallContext webInstallCtx;
 
 void clearWebInstallContext() { webInstallCtx = WebInstallContext(); }
 
-bool failWebInstall(const String &message, uint32_t delayMs = 3000, bool clearContext = false) {
-    displayRedStripe(message);
-    launcherDelayMs(delayMs);
+bool failWebInstall(const String &message, bool clearContext = false) {
+    displayError(message);
     if (clearContext) clearWebInstallContext();
     return false;
 }
@@ -155,7 +154,9 @@ bool prepareWebDataPartition(
     if (subtype == 0x81) {
         LauncherPartitionPayloadPlan payload =
             launcherPartitionFatPayloadPlan(label.c_str(), declaredSize, copySize);
-        return launcherPartitionFindOrCreateData(table, subtype, label.c_str(), payload.partitionSize, entry, error);
+        return launcherPartitionFindOrCreateData(
+            table, subtype, label.c_str(), payload.partitionSize, entry, error
+        );
     }
 
     LauncherPartitionEntry *existing = launcherPartitionFindByLabel(table, label.c_str());
@@ -235,20 +236,19 @@ bool finishWebInstallStage(WebInstallStage &stage) {
     return true;
 }
 
-
 bool finalizeWebInstall() {
     if (webInstallCtx.currentStage != webInstallCtx.stages.size() ||
         webInstallCtx.totalWritten != webInstallCtx.totalCopySize) {
-        return failWebInstall("Fail 376: 3", 3000, true);
+        return failWebInstall("Fail 376: 3", true);
     }
 
     String tableError;
     if (!launcherPartitionWriteGeneratedTable(webInstallCtx.table, &tableError)) {
-        return failWebInstall(tableError.length() ? tableError : "Table failed", 3000, true);
+        return failWebInstall(tableError.length() ? tableError : "Table failed", true);
     }
     if (webInstallCtx.appEntry.offset != 0 &&
         !launcherPartitionSetOtaBoot(webInstallCtx.table, webInstallCtx.appEntry.subtype, &tableError)) {
-        return failWebInstall(tableError.length() ? tableError : "Boot failed", 3000, true);
+        return failWebInstall(tableError.length() ? tableError : "Boot failed", true);
     }
 
     {
@@ -401,13 +401,12 @@ bool prepareWebInstallContext(int commandValue, size_t uploadSize, const WebPara
         }
         stage.entry = webInstallCtx.appEntry;
     } else {
-        uint8_t subtype = params.has("subtype")
-                              ? static_cast<uint8_t>(params.get("subtype").toInt())
-                              : 0x82;
+        uint8_t subtype = params.has("subtype") ? static_cast<uint8_t>(params.get("subtype").toInt()) : 0x82;
         String label = params.get("label");
         if (label.isEmpty()) label = launcherInstallDefaultDataLabel(subtype);
-        const uint32_t declaredSize =
-            params.has("declaredSize") ? static_cast<uint32_t>(params.get("declaredSize").toInt()) : stage.copySize;
+        const uint32_t declaredSize = params.has("declaredSize")
+                                          ? static_cast<uint32_t>(params.get("declaredSize").toInt())
+                                          : stage.copySize;
         if (!prepareWebDataPartition(
                 webInstallCtx.table, subtype, label, declaredSize, stage.copySize, stage.entry, error
             )) {
@@ -461,9 +460,7 @@ bool writeWebInstallData(const uint8_t *data, size_t len) {
 **  Function: webUIMyNet
 **  Display options to launch the WebUI
 **********************************************************************/
-void webUIMyNet() {
-    startWebUi("", 0, false);
-}
+void webUIMyNet() { startWebUi("", 0, false); }
 
 /**********************************************************************
 **  Function: loopOptionsWebUi
@@ -584,7 +581,8 @@ bool receiveBody(httpd_req_t *req, String &body, size_t maxSize = 8192) {
     body = "";
     body.reserve(req->content_len + 1);
     size_t remaining = req->content_len;
-    std::unique_ptr<uint8_t[]> buffGuard(new (std::nothrow) uint8_t[bufSize]); // on-demand, httpd task has a small stack
+    std::unique_ptr<uint8_t[]> buffGuard(new (std::nothrow)
+                                             uint8_t[bufSize]); // on-demand, httpd task has a small stack
     uint8_t *buff = buffGuard.get();
     if (!buff) return false;
     while (remaining > 0) {
@@ -746,13 +744,12 @@ bool writeUploadData(File &file, const uint8_t *data, size_t len, size_t written
     if (!update) return file.write(data, len) == len;
     if (webInstallCtx.active) {
         if (!writeWebInstallData(data, len)) {
-            return failWebInstall("FAIL 330: " + String(launcherUpdateLastError()), 2000);
+            return failWebInstall("FAIL 330: " + String(launcherUpdateLastError()));
         }
         return true;
     }
     if (launcherUpdateWrite(data, len) != len) {
-        displayRedStripe("FAIL 330");
-        launcherDelayMs(2000);
+        displayError("FAIL 330");
         return false;
     }
     progressHandler(written + len, file_size);
@@ -783,9 +780,7 @@ bool finishUploadTarget(File &file) {
         file.close();
         return true;
     }
-    if (webInstallCtx.active) {
-        return finalizeWebInstall();
-    }
+    if (webInstallCtx.active) { return finalizeWebInstall(); }
     return false;
 }
 
@@ -807,7 +802,8 @@ bool streamMultipartUpload(httpd_req_t *req) {
     bool finishedFile = false;
     size_t written = 0;
     size_t remaining = req->content_len;
-    std::unique_ptr<uint8_t[]> buffGuard(new (std::nothrow) uint8_t[bufSize]); // on-demand, httpd task has a small stack
+    std::unique_ptr<uint8_t[]> buffGuard(new (std::nothrow)
+                                             uint8_t[bufSize]); // on-demand, httpd task has a small stack
     uint8_t *buff = buffGuard.get();
     if (!buff) {
         sendText(req, 500, "text/plain", "Out of memory");
@@ -1089,7 +1085,8 @@ void sendFileDownload(httpd_req_t *req, const String &fileName) {
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     String disposition = "attachment; filename=\"" + fileName.substring(fileName.lastIndexOf('/') + 1) + "\"";
     httpd_resp_set_hdr(req, "Content-Disposition", disposition.c_str());
-    std::unique_ptr<uint8_t[]> buffGuard(new (std::nothrow) uint8_t[bufSize]); // on-demand, httpd task has a small stack
+    std::unique_ptr<uint8_t[]> buffGuard(new (std::nothrow)
+                                             uint8_t[bufSize]); // on-demand, httpd task has a small stack
     uint8_t *buff = buffGuard.get();
     if (!buff) {
         file.close();
@@ -1152,7 +1149,8 @@ esp_err_t editfileHandler(httpd_req_t *req) {
         }
         httpd_resp_set_type(req, "text/plain");
         httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-        std::unique_ptr<uint8_t[]> buffGuard(new (std::nothrow) uint8_t[bufSize]); // on-demand, httpd task has a small stack
+        std::unique_ptr<uint8_t[]> buffGuard(new (std::nothrow)
+                                                 uint8_t[bufSize]); // on-demand, httpd task has a small stack
         uint8_t *buff = buffGuard.get();
         if (!buff) {
             file.close();

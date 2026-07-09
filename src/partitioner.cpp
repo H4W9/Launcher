@@ -158,7 +158,7 @@ void drawRangeSlider(
     tft->drawCentreString(" Confirm/Exit ", tftWidth / 2, barY + 16, 1);
 
     tft->setTextColor(ALCOLOR, BGCOLOR);
-    
+
     // Spread the three hints into left/centre/right columns so they
     // line up cleanly across the width (matches the touch footer layout).
     const int hintY = tftHeight - (LH * FP + 8);
@@ -178,8 +178,7 @@ bool rangeSlider(
     end = alignDownLocal(end, step);
 
     if (maxOffset <= minOffset || maxOffset - minOffset < minSize) {
-        displayRedStripe("No usable range");
-        launcherDelayMs(2000);
+        displayError("No usable range");
         return false;
     }
     if (start < minOffset) start = minOffset;
@@ -390,8 +389,7 @@ bool validateOrShow(const LauncherPartitionTable &table) {
     String error;
     if (launcherPartitionValidate(table, &error)) return true;
     launcherConsolePrintf("Partition validation failed: %s\n", error.c_str());
-    displayRedStripe(error.length() ? error : "Invalid partition");
-    launcherDelayMs(2500);
+    displayError(error.length() ? error : "Invalid partition");
     return false;
 }
 
@@ -399,8 +397,7 @@ bool compactOrShow(LauncherPartitionTable &table) {
     String error;
     if (launcherPartitionCompact(table, &error)) return true;
     launcherConsolePrintf("Partition compact failed: %s\n", error.c_str());
-    displayRedStripe(error.length() ? error : "Compact failed");
-    launcherDelayMs(2500);
+    displayError(error.length() ? error : "Compact failed");
     return false;
 }
 
@@ -408,8 +405,7 @@ bool editPartitionSize(LauncherPartitionTable &table, const LauncherPartitionEnt
     int index = findEntryIndex(table, target);
     if (index < 0) return false;
     if (isProtectedPartition(table.entries[index])) {
-        displayRedStripe("Protected partition");
-        launcherDelayMs(2000);
+        displayError("Protected partition");
         return false;
     }
 
@@ -444,8 +440,7 @@ bool removePartition(LauncherPartitionTable &table, const LauncherPartitionEntry
     int index = findEntryIndex(table, target);
     if (index < 0) return false;
     if (isProtectedPartition(table.entries[index])) {
-        displayRedStripe("Protected partition");
-        launcherDelayMs(2000);
+        displayError("Protected partition");
         return false;
     }
     if (!confirmAction("Remove partition?")) return false;
@@ -460,21 +455,18 @@ bool removePartition(LauncherPartitionTable &table, const LauncherPartitionEntry
 
 bool formatPartition(const LauncherPartitionEntry &entry, bool dirty) {
     if (dirty) {
-        displayRedStripe("Apply changes first");
-        launcherDelayMs(2000);
+        displayError("Apply changes first");
         return false;
     }
     if (isProtectedPartition(entry) || !entry.isData()) {
-        displayRedStripe("Cannot format");
-        launcherDelayMs(2000);
+        displayError("Cannot format");
         return false;
     }
     if (!confirmAction("Erase partition?")) return false;
 
     displayRedStripe("Formatting...");
     bool ok = launcherRawPrepareDataPartition(entry.offset, entry.size);
-    displayRedStripe(ok ? "Formatted" : launcherUpdateLastErrorName());
-    launcherDelayMs(2000);
+    displayError(ok ? "Formatted" : launcherUpdateLastErrorName());
     return ok;
 }
 
@@ -523,15 +515,13 @@ bool createPartition(
     String error;
     if (preferredRange) {
         if (!normalizeFreeSliderRange(*preferredRange, requestedSize, alignment, range)) {
-            displayRedStripe("No space in range");
-            launcherDelayMs(2000);
+            displayError("No space in range");
             return false;
         }
     } else {
         if (!findFreeSliderRange(table, requestedSize, alignment, range, &error)) {
             launcherConsolePrintf("Partition range selection failed: %s\n", error.c_str());
-            displayRedStripe(error.length() ? error : "No free range");
-            launcherDelayMs(2500);
+            displayError(error.length() ? error : "No free range");
             return false;
         }
     }
@@ -563,8 +553,7 @@ bool createPartition(
     if (type == 0x00) {
         int nextSubtype = launcherPartitionNextOtaSubtype(table);
         if (nextSubtype < 0) {
-            displayRedStripe("No OTA slot");
-            launcherDelayMs(2000);
+            displayError("No OTA slot");
             return false;
         }
         created.subtype = static_cast<uint8_t>(nextSubtype);
@@ -572,8 +561,7 @@ bool createPartition(
 
     if (!launcherPartitionAdd(edited, created, &error)) {
         launcherConsolePrintf("Partition create failed: %s\n", error.c_str());
-        displayRedStripe(error.length() ? error : "Create failed");
-        launcherDelayMs(2500);
+        displayError(error.length() ? error : "Create failed");
         return false;
     }
     if (!compactOrShow(edited)) return false;
@@ -608,24 +596,21 @@ bool applyPartitionChanges(const LauncherPartitionTable &table) {
     LauncherPartitionTable current;
     if (!launcherPartitionReadCurrent(current, &error)) {
         launcherConsolePrintf("Partition table read failed: %s\n", error.c_str());
-        displayRedStripe(error.length() ? error : "Read failed");
-        launcherDelayMs(2500);
+        displayError(error.length() ? error : "Read failed");
         return false;
     }
 
     displayRedStripe("Optimizing flash");
     if (!launcherPartitionMigrateMovedData(current, target, &error)) {
         launcherConsolePrintf("Partition data move failed: %s\n", error.c_str());
-        displayRedStripe(error.length() ? error : "Move failed");
-        launcherDelayMs(2500);
+        displayError(error.length() ? error : "Move failed");
         return false;
     }
 
     displayRedStripe("Writing table");
     if (!launcherPartitionWriteGeneratedTable(target, &error)) {
         launcherConsolePrintf("Partition table write failed: %s\n", error.c_str());
-        displayRedStripe(error.length() ? error : "Write failed");
-        launcherDelayMs(2500);
+        displayError(error.length() ? error : "Write failed");
         return false;
     }
 
@@ -646,8 +631,7 @@ void partList() {
     returnToMenu = false;
     if (!launcherPartitionReadCurrent(table, &error)) {
         launcherConsolePrintf("Partition table read failed: %s\n", error.c_str());
-        displayRedStripe(error.length() ? error : "Partition read failed");
-        launcherDelayMs(2500);
+        displayError(error.length() ? error : "Partition read failed");
         return;
     }
 
@@ -702,11 +686,10 @@ void partList() {
                              String typeName = dataSubtypeName(entry.subtype);
                              String path = backupPartition(linkedAppNum, entry.label, typeName.c_str());
                              if (path.isEmpty()) {
-                                 displayRedStripe("Backup failed");
+                                 displayError("Backup failed");
                              } else {
-                                 displayRedStripe("Backup saved!");
+                                 displayError("Backup saved!");
                              }
-                             launcherDelayMs(1500);
                          } else {
                              String outputPath = String("/bkp/") + entry.label;
                              dumpPartition(entry.label, outputPath.c_str());
@@ -736,8 +719,7 @@ void partList() {
                                  info.partitions.push_back(bp);
                              }
                              saveInstalledToConfig(info);
-                             displayRedStripe(("Linked to " + launcherAppNameFromFile(selectedBin)).c_str());
-                             launcherDelayMs(1500);
+                             displayError(("Linked to " + launcherAppNameFromFile(selectedBin)).c_str());
                          }
                      }
                  },
@@ -792,10 +774,7 @@ void partList() {
                      if (confirmAction("Discard changes?")) {
                          String readError;
                          if (launcherPartitionReadCurrent(table, &readError)) dirty = false;
-                         else {
-                             displayRedStripe(readError.length() ? readError : "Reload failed");
-                             launcherDelayMs(2500);
-                         }
+                         else { displayError(readError.length() ? readError : "Reload failed"); }
                      }
                  }}
             );
@@ -868,8 +847,7 @@ void dumpPartition(const char *partitionLabel, const char *outputPath) {
     outputFile.close();
     displayRedStripe("    Complete!    ");
     launcherDelayMs(500);
-    displayRedStripe(output);
-    launcherDelayMs(2500);
+    displayError(output);
     launcherConsolePrintf("Dump da partição %s para o arquivo %s concluído\n", partitionLabel, outputPath);
 
     bool attach = false;
@@ -892,20 +870,17 @@ void restorePartition(const char *partitionLabel) {
 
     File source = SDM.open(filepath, "r");
     if (!source) {
-        displayRedStripe("Can't open file");
-        launcherDelayMs(2500);
+        displayError("Can't open file");
         return;
     }
     bool restored = performDATAUpdate(source, source.size(), partitionLabel);
     source.close();
     if (!restored) {
-        displayRedStripe(launcherUpdateLastErrorName());
-        launcherDelayMs(2500);
+        displayError(launcherUpdateLastErrorName());
         return;
     }
     launcherDelayMs(100);
-    displayRedStripe("    Restored!    ");
-    launcherDelayMs(2500);
+    displayError("    Restored!    ");
 }
 
 #define TAG "Partitioneer"
@@ -953,16 +928,14 @@ void partitionCrawler() {
     displayRedStripe("Launcher Update");
     if (!launcherUpdateCopyPartition(running_partition, test_partition, progressHandler)) {
         ESP_LOGE(TAG, "Failed to copy partition data");
-        displayRedStripe("Use M5Burner!");
-        launcherDelayMs(5000);
+        displayError("Use M5Burner!");
         return;
     }
 
     bool removedRunningOta = false;
     displayRedStripe("Updating table");
     if (!launcherUpdateRepairPartitionTable(running_partition->address, &removedRunningOta)) {
-        displayRedStripe("Partition fix failed");
-        launcherDelayMs(5000);
+        displayError("Partition fix failed");
         return;
     }
 
@@ -1001,8 +974,7 @@ bool attachPartition(const String &_from, String _to) {
     launcherConsolePrintf("From: %s\nTo: %s\n", _from.c_str(), _to.c_str());
     File to = SDM.open(_to, FILE_READ);
     if (!to) {
-        displayRedStripe("Can't open target");
-        launcherDelayMs(2500);
+        displayError("Can't open target");
         return false;
     }
 
@@ -1033,8 +1005,7 @@ bool attachPartition(const String &_from, String _to) {
 
         File original = SDM.open(_to, FILE_READ);
         if (!original) {
-            displayRedStripe("Can't open target");
-            launcherDelayMs(2500);
+            displayError("Can't open target");
             return false;
         }
         const uint32_t app_size = (original.size() + 0xFFFFu) & ~0xFFFFu;
@@ -1059,8 +1030,7 @@ bool attachPartition(const String &_from, String _to) {
 
         File rebuilt = SDM.open(new_path, FILE_WRITE, true);
         if (!rebuilt) {
-            displayRedStripe("Can't create target");
-            launcherDelayMs(2500);
+            displayError("Can't create target");
             original.close();
             return false;
         }
@@ -1076,8 +1046,7 @@ bool attachPartition(const String &_from, String _to) {
 
         uint8_t *table = (uint8_t *)heap_caps_malloc(PARTITION_SIZE, MALLOC_CAP_INTERNAL);
         if (table == NULL) {
-            displayRedStripe("No memory");
-            launcherDelayMs(2500);
+            displayError("No memory");
             rebuilt.close();
             original.close();
             return false;
@@ -1144,8 +1113,7 @@ bool attachPartition(const String &_from, String _to) {
 
     File target = SDM.open(_to, FILE_WRITE);
     if (!target) {
-        displayRedStripe("Can't reopen target");
-        launcherDelayMs(2500);
+        displayError("Can't reopen target");
         return false;
     }
 
@@ -1177,8 +1145,7 @@ bool attachPartition(const String &_from, String _to) {
     // copy data from source file
     File from = SDM.open(_from, FILE_READ);
     if (!from) {
-        displayRedStripe("Can't open source");
-        launcherDelayMs(2500);
+        displayError("Can't open source");
         target.close();
         return false;
     }

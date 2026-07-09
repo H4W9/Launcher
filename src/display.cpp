@@ -448,6 +448,18 @@ void displayRedStripe(const String &text, uint16_t fgcolor, uint16_t bgcolor) {
 }
 
 /***************************************************************************************
+** Function name: displayError
+** Description:   Show an error via the red stripe, then either wait for a keypress
+**               or block for a fixed delay, depending on waitKeyPress.
+***************************************************************************************/
+void displayError(String txt, bool waitKeyPress) {
+    displayRedStripe(txt);
+    Serial.println("ERR: " + txt);
+    if (!waitKeyPress) vTaskDelay(pdMS_TO_TICKS(2000));
+    while (waitKeyPress && !check(AnyKeyPress)) vTaskDelay(pdMS_TO_TICKS(10));
+}
+
+/***************************************************************************************
 ** Function name: progressHandler
 ** Description:   Função para manipular o progresso da atualização
 ** Dependencia: prog_handler =>>    0 - Flash, 1 - SPIFFS

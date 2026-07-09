@@ -259,8 +259,7 @@ void MassStorage::setup() {
     setShouldStop(false);
     SDM.end(); // Forces SDCard mounting again.
     if (!setupSdCard()) {
-        displayRedStripe("SD card not found.");
-        launcherDelayMs(1000);
+        displayError("SD card not found.");
         return;
     }
 

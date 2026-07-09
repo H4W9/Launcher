@@ -140,8 +140,7 @@ bool copyFile(const String &path) {
         file.close();
         return true;
     } else {
-        displayRedStripe("Cannot copy Folder");
-        launcherDelayMs(2000);
+        displayError("Cannot copy Folder");
         file.close();
         return false;
     }
@@ -210,8 +209,7 @@ bool createFolder(String path) {
     }
     if (path != "/") path += "/";
     if (!SDM.mkdir(path + foldername)) {
-        displayRedStripe("Couldn't create folder");
-        launcherDelayMs(2000);
+        displayError("Couldn't create folder");
         return false;
     }
     return true;
@@ -245,14 +243,12 @@ void readFs(String &folder, std::vector<Option> &opt) {
     opt.clear();
     if (!setupSdCard()) {
         // Serial.println("Falha ao iniciar o cartão SD");
-        displayRedStripe("SD not found or not formatted in FAT32");
-        vTaskDelay(2500 / portTICK_PERIOD_MS);
+        displayError("SD not found or not formatted in FAT32");
         return; // Retornar imediatamente em caso de falha
     }
     File root = SDM.open(folder);
     if (!root || !root.isDirectory()) {
-        displayRedStripe("Fail open root");
-        vTaskDelay(2500 / portTICK_PERIOD_MS);
+        displayError("Fail open root");
         SDM.end();
         sdcardMounted = false;
         return; // Retornar imediatamente se não for possível abrir o diretório
@@ -571,14 +567,12 @@ static bool installFromSdDynamic(
     String error;
     LauncherPartitionTable table;
     if (!launcherPartitionReadCurrent(table, &error)) {
-        displayRedStripe(error.length() ? error : "Partition read failed");
-        launcherDelayMs(2000);
+        displayError(error.length() ? error : "Partition read failed");
         return false;
     }
 
     if (appSize == 0 || appOffset + appSize > file.size()) {
-        displayRedStripe("Invalid app image");
-        launcherDelayMs(2000);
+        displayError("Invalid app image");
         return false;
     }
 
@@ -587,13 +581,11 @@ static bool installFromSdDynamic(
 
     if (!launcherSelectInstallLayout(table, appSize, appLabel, dataPartitions, appEntry, error)) {
         launcherConsolePrintf("SD install layout failed: %s\n", error.c_str());
-        displayRedStripe(error.length() ? error : "No install space");
-        launcherDelayMs(2000);
+        displayError(error.length() ? error : "No install space");
         return false;
     }
     if (!launcherPartitionValidate(table, &error)) {
-        displayRedStripe(error.length() ? error : "Invalid table");
-        launcherDelayMs(2000);
+        displayError(error.length() ? error : "Invalid table");
         return false;
     }
 
@@ -626,8 +618,7 @@ static bool installFromSdDynamic(
     displayRedStripe("Installing APP");
     prog_handler = 0;
     if (!flashRawFromSd(file, appOffset, appSize, appEntry, true)) {
-        displayRedStripe(String("APP: ") + launcherUpdateLastErrorName());
-        launcherDelayMs(2000);
+        displayError(String("APP: ") + launcherUpdateLastErrorName());
         goto DONE;
     }
 
@@ -648,23 +639,20 @@ static bool installFromSdDynamic(
         prog_handler = 1;
         const uint32_t copySize = dp.copySize > dp.entry.size ? dp.entry.size : dp.copySize;
         if (!flashRawFromSd(file, dp.sourceOffset, copySize, dp.entry, false)) {
-            displayRedStripe(String(typeStr) + ": " + launcherUpdateLastErrorName());
-            launcherDelayMs(2000);
+            displayError(String(typeStr) + ": " + launcherUpdateLastErrorName());
             goto DONE;
         }
     }
 
     displayRedStripe("Writing table");
     if (!launcherPartitionWriteGeneratedTable(table, &error)) {
-        displayRedStripe(error.length() ? error : "Table failed");
-        launcherDelayMs(2000);
+        displayError(error.length() ? error : "Table failed");
         goto DONE;
     }
 
     displayRedStripe("Setting boot");
     if (!launcherPartitionSetOtaBoot(table, appEntry.subtype, &error)) {
-        displayRedStripe(error.length() ? error : "Boot failed");
-        launcherDelayMs(2000);
+        displayError(error.length() ? error : "Boot failed");
         goto DONE;
     }
 
@@ -872,14 +860,12 @@ void updateFromSD(const String &path) {
         log_i("Data partitions: %d", dataPartitions.size());
 
         if (!installFromSdDynamic(file, path, app_size, app_offset, dataPartitions)) { goto Exit; }
-        displayRedStripe("Complete");
-        launcherDelayMs(1000);
+        displayError("Complete");
         FREE_TFT
         reboot();
     }
 Exit:
-    displayRedStripe("Update Error.");
-    launcherDelayMs(2500);
+    displayError("Update Error.");
 }
 
 /***************************************************************************************

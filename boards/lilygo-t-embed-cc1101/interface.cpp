@@ -1,7 +1,7 @@
+#include "idf/launcher_platform.h"
 #include "powerSave.h"
 #include <globals.h>
 #include <interface.h>
-#include "idf/launcher_platform.h"
 
 // Rotary encoder
 #include <RotaryEncoder.h>
@@ -167,8 +167,7 @@ void powerOff() {
          }                                           },
         {"Power Off",
          []() {
-             displayRedStripe("Connect to USB to pwr on");
-             launcherDelayMs(3000);
+             displayError("Connect to USB to pwr on");
              for (int i = 3; i > 0; i--) {
                  displayRedStripe("Shutting down in " + String(i));
                  launcherDelayMs(1000);
@@ -219,7 +218,8 @@ void checkReboot() {
 
         // Clear text after releasing the button
         launcherDelayMs(30);
-        if (launcherMillis() - time_count > 500) tft->fillRect(tftWidth / 2 - 9 * LW, 12, 18 * LW, LH * FP, BGCOLOR);
+        if (launcherMillis() - time_count > 500)
+            tft->fillRect(tftWidth / 2 - 9 * LW, 12, 18 * LW, LH * FP, BGCOLOR);
     }
 #endif
 }

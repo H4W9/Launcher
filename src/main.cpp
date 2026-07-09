@@ -16,9 +16,9 @@
 #include <SD.h>
 #include <SPIFFS.h>
 
-#include "utils.h"
 #include "powerSave.h"
 #include "ram_profile.h"
+#include "utils.h"
 #include <functional>
 #include <iostream>
 #include <string>
@@ -395,8 +395,7 @@ void loop() {
                     tft->drawPixel(0, 0, 0);
                     tft->fillScreen(BGCOLOR);
                 } else {
-                    displayRedStripe("Insert SD Card");
-                    launcherDelayMs(2000);
+                    displayError("Insert SD Card");
                 }
             }, sdcardMounted
         },
@@ -460,8 +459,7 @@ void loop() {
                 update_sd = sdcardMounted;
             }
             if (!dev_mode && pass_by == 5) {
-                displayRedStripe("Dev mode Activated");
-                vTaskDelay(2000 / portTICK_PERIOD_MS);
+                displayError("Dev mode Activated");
                 dev_mode = true;
             }
             drawMainMenu(menuItems, index);

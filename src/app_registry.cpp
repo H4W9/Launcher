@@ -344,32 +344,30 @@ std::vector<LauncherAppMetadata> launcherListInstalledApps() {
     return apps;
 }
 
+static bool reportStepFailed(const String &error, const char *fallback) {
+    displayError(error.length() ? error : fallback);
+    return false;
+}
+
+static bool reportAppNotFound() {
+    displayError("App not found");
+    return false;
+}
+
 bool launcherBootAppByLabel(const char *label) {
-    if (!label || !label[0]) {
-        displayRedStripe("App not found");
-        launcherDelayMs(2000);
-        return false;
-    }
+    if (!label || !label[0]) return reportAppNotFound();
 
     LauncherPartitionTable table;
     String error;
     if (!launcherPartitionReadCurrent(table, &error)) {
-        displayRedStripe(error.length() ? error : "Partition read failed");
-        launcherDelayMs(2000);
-        return false;
+        return reportStepFailed(error, "Partition read failed");
     }
 
     const LauncherPartitionEntry *entry = launcherPartitionFindByLabel(table, label);
-    if (!entry || !entry->isOtaApp()) {
-        displayRedStripe("App not found");
-        launcherDelayMs(2000);
-        return false;
-    }
+    if (!entry || !entry->isOtaApp()) return reportAppNotFound();
 
     if (!launcherPartitionSetOtaBoot(table, entry->subtype, &error)) {
-        displayRedStripe(error.length() ? error : "Boot set failed");
-        launcherDelayMs(2500);
-        return false;
+        return reportStepFailed(error, "Boot set failed");
     }
 
     lastInstalledApp = launcherAppDisplayNameForLabel(label);
@@ -381,18 +379,12 @@ bool launcherBootAppByLabel(const char *label) {
 }
 
 bool launcherDeleteAppByLabel(const char *label) {
-    if (!label || !label[0]) {
-        displayRedStripe("App not found");
-        launcherDelayMs(2000);
-        return false;
-    }
+    if (!label || !label[0]) return reportAppNotFound();
 
     LauncherPartitionTable table;
     String error;
     if (!launcherPartitionReadCurrent(table, &error)) {
-        displayRedStripe(error.length() ? error : "Partition read failed");
-        launcherDelayMs(2500);
-        return false;
+        return reportStepFailed(error, "Partition read failed");
     }
 
     int appIndex = -1;
@@ -404,11 +396,7 @@ bool launcherDeleteAppByLabel(const char *label) {
             break;
         }
     }
-    if (appIndex < 0) {
-        displayRedStripe("App not found");
-        launcherDelayMs(2000);
-        return false;
-    }
+    if (appIndex < 0) return reportAppNotFound();
 
     String appName = launcherAppDisplayNameForLabel(label);
     std::vector<String> linkedFatLabels = launcherAppFatLabelsForLabel(label);
@@ -437,10 +425,7 @@ bool launcherDeleteAppByLabel(const char *label) {
             loopOptions(opts);
             if (choice == 2) return false;
             if (choice == 0) {
-                if (!backupAllPartitionsForApp(appNum)) {
-                    displayRedStripe("Backup failed");
-                    launcherDelayMs(1500);
-                }
+                if (!backupAllPartitionsForApp(appNum)) displayError("Backup failed");
             }
         }
     }
@@ -472,22 +457,12 @@ bool launcherDeleteAppByLabel(const char *label) {
         }
     }
     normalizeOtaSubtypes(edited);
-    if (!launcherPartitionCompact(edited, &error)) {
-        displayRedStripe(error.length() ? error : "Compact failed");
-        launcherDelayMs(2500);
-        return false;
-    }
-    if (!launcherPartitionValidate(edited, &error)) {
-        displayRedStripe(error.length() ? error : "Invalid table");
-        launcherDelayMs(2500);
-        return false;
-    }
+    if (!launcherPartitionCompact(edited, &error)) return reportStepFailed(error, "Compact failed");
+    if (!launcherPartitionValidate(edited, &error)) return reportStepFailed(error, "Invalid table");
 
     displayRedStripe("Clearing boot");
     if (!launcherPartitionClearOtaBoot(table, &error)) {
-        displayRedStripe(error.length() ? error : "Boot clear failed");
-        launcherDelayMs(2500);
-        return false;
+        return reportStepFailed(error, "Boot clear failed");
     }
 
     displayRedStripe("Removing firmware");
@@ -501,40 +476,29 @@ bool launcherDeleteAppByLabel(const char *label) {
                 removed.size,
                 err
             );
-            displayRedStripe("Erase failed");
-            launcherDelayMs(2500);
-            return false;
+            return reportStepFailed(String(), "Erase failed");
         }
     }
 
     displayRedStripe("Optimizing flash");
     if (!launcherPartitionMigrateMovedData(table, edited, &error)) {
-        displayRedStripe(error.length() ? error : "Move failed");
-        launcherDelayMs(2500);
-        return false;
+        return reportStepFailed(error, "Move failed");
     }
 
     displayRedStripe("Writing table");
     if (!launcherPartitionWriteGeneratedTable(edited, &error)) {
-        displayRedStripe(error.length() ? error : "Write failed");
-        launcherDelayMs(2500);
-        return false;
+        return reportStepFailed(error, "Write failed");
     }
 
     launcherRemoveAppMetadata(label);
-    displayRedStripe("Restart needed");
-    launcherDelayMs(1500);
+    displayError("Restart needed");
     FREE_TFT
     reboot();
     return true;
 }
 
 bool launcherRenameAppByLabel(const char *label) {
-    if (!label || !label[0]) {
-        displayRedStripe("App not found");
-        launcherDelayMs(2000);
-        return false;
-    }
+    if (!label || !label[0]) return reportAppNotFound();
 
     String appLabel = String(label);
     String currentName = loadAppNameForLabel(label);
@@ -544,17 +508,12 @@ bool launcherRenameAppByLabel(const char *label) {
     newName.trim();
     if (newName.isEmpty() || newName == String(KEY_ESCAPE) || newName == currentName) { return false; }
 
-    if (!saveAppNameForLabel(label, newName)) {
-        displayRedStripe("Rename failed");
-        launcherDelayMs(2000);
-        return false;
-    }
+    if (!saveAppNameForLabel(label, newName)) return reportStepFailed(String(), "Rename failed");
 
     String appNum = loadAppNumForLabel(label);
     if (!appNum.isEmpty()) { updateInstalledAppName(appNum, newName); }
 
-    displayRedStripe("App renamed");
-    launcherDelayMs(1000);
+    displayError("App renamed");
     return true;
 }
 
@@ -568,14 +527,11 @@ static void showAppBackupMenu(const String &appNum) {
         opts.push_back({optLabel, [appNum, bp]() {
                             displayRedStripe(("Backing up " + bp.label + "...").c_str());
                             String path = backupPartition(appNum, bp.label.c_str(), bp.type.c_str());
-                            if (!path.isEmpty()) {
-                                displayRedStripe("Backup saved!");
-                            } else {
-                                displayRedStripe(("Backup failed: " + bp.label).c_str());
-                                launcherDelayMs(2500);
+                            if (path.isEmpty()) {
+                                displayError("Backup failed: " + bp.label);
                                 return;
                             }
-                            launcherDelayMs(1500);
+                            displayError("Backup saved!");
                         }});
     }
 
@@ -585,8 +541,7 @@ static void showAppBackupMenu(const String &appNum) {
 
 void launcherShowAppActions(const char *label) {
     if (!label || !label[0]) {
-        displayRedStripe("App not found");
-        launcherDelayMs(2000);
+        displayError("App not found");
         return;
     }
 
@@ -624,8 +579,7 @@ void launcherShowAppLauncher() {
     appOptions.push_back({"Cancel", []() {}});
 
     if (appOptions.size() <= 1) {
-        displayRedStripe("No apps found");
-        launcherDelayMs(2000);
+        displayError("No apps found");
         return;
     }
     loopOptions(appOptions);

@@ -81,8 +81,7 @@ bool wifiConnect(const String &ssid, int encryptation, bool isAP) {
             connectState = launcherWifiConnectStatus(ssid.c_str(), pwd.c_str(), 500);
             if (connectState == LauncherWifiConnectState::Connected) break;
             if (connectState == LauncherWifiConnectState::WrongPassword) {
-                displayRedStripe("Wrong Password");
-                launcherDelayMs(1200);
+                displayError("Wrong Password");
                 wrongPass = true;
                 goto Retry;
             }
@@ -417,8 +416,7 @@ bool installFirmwareDynamic(
     String error;
     LauncherPartitionTable table;
     if (!launcherPartitionReadCurrent(table, &error)) {
-        displayRedStripe(error.length() ? error : "Partition read failed");
-        launcherDelayMs(2000);
+        displayError(error.length() ? error : "Partition read failed");
         return false;
     }
 
@@ -427,24 +425,21 @@ bool installFirmwareDynamic(
     if (updateSize == 0) {
         size_t remoteSize = 0;
         if (!getRemoteFileSize(fileAddr, remoteSize, hwid.c_str())) {
-            displayRedStripe("Size failed");
-            launcherDelayMs(2000);
+            displayError("Size failed");
             return false;
         }
         if (nb) {
             updateSize = remoteSize;
         } else {
             if (appOffset >= remoteSize) {
-                displayRedStripe("Bad app offset");
-                launcherDelayMs(2000);
+                displayError("Bad app offset");
                 return false;
             }
             updateSize = remoteSize - appOffset;
         }
     }
     if (updateSize == 0) {
-        displayRedStripe("Invalid app size");
-        launcherDelayMs(2000);
+        displayError("Invalid app size");
         return false;
     }
     if (appPartitionSize == 0 || appPartitionSize < updateSize) appPartitionSize = updateSize;
@@ -453,8 +448,7 @@ bool installFirmwareDynamic(
     LauncherPartitionEntry appEntry;
 
     if (!launcherSelectInstallLayout(table, appPartitionSize, appLabel, dataPartitions, appEntry, error)) {
-        displayRedStripe(error.length() ? error : "No install space");
-        launcherDelayMs(2000);
+        displayError(error.length() ? error : "No install space");
         return false;
     }
 
@@ -464,8 +458,7 @@ bool installFirmwareDynamic(
     prog_handler = 0;
     progressHandler(0, updateSize);
     if (!flashRawRangeFromHttp(fileAddr, nb ? 0 : appOffset, updateSize, appEntry, true, hwid.c_str())) {
-        displayRedStripe(String("APP: ") + launcherUpdateLastErrorName());
-        launcherDelayMs(2000);
+        displayError(String("APP: ") + launcherUpdateLastErrorName());
         goto DONE;
     }
 
@@ -480,23 +473,20 @@ bool installFirmwareDynamic(
         // source offset; embedded data keeps using the app image URL (fileAddr).
         const String &partAddr = dp.sourceUrl.isEmpty() ? fileAddr : dp.sourceUrl;
         if (!flashRawRangeFromHttp(partAddr, dp.sourceOffset, copySize, dp.entry, false, hwid.c_str())) {
-            displayRedStripe(String(typeStr) + ": " + launcherUpdateLastErrorName());
-            launcherDelayMs(2000);
+            displayError(String(typeStr) + ": " + launcherUpdateLastErrorName());
             goto DONE;
         }
     }
 
     displayRedStripe("Writing table");
     if (!launcherPartitionWriteGeneratedTable(table, &error)) {
-        displayRedStripe(error.length() ? error : "Table failed");
-        launcherDelayMs(2000);
+        displayError(error.length() ? error : "Table failed");
         goto DONE;
     }
 
     displayRedStripe("Setting boot");
     if (!launcherPartitionSetOtaBoot(table, appEntry.subtype, &error)) {
-        displayRedStripe(error.length() ? error : "Boot failed");
-        launcherDelayMs(2000);
+        displayError(error.length() ? error : "Boot failed");
         goto DONE;
     }
 
@@ -543,8 +533,7 @@ DONE:
 
 bool getInfo(const String &serverUrl, JsonDocument &_doc, JsonDocument *filter = nullptr) {
     if (!launcherWifiIsConnected()) {
-        displayRedStripe("WiFi not connected");
-        vTaskDelay(1500 / portTICK_PERIOD_MS);
+        displayError("WiFi not connected");
         return false;
     }
 
@@ -566,8 +555,7 @@ bool getInfo(const String &serverUrl, JsonDocument &_doc, JsonDocument *filter =
                 filter ? deserializeJson(_doc, payload, DeserializationOption::Filter(*filter))
                        : deserializeJson(_doc, payload);
             if (error) {
-                displayRedStripe(String("JSON Parse Failed: ") + error.c_str());
-                vTaskDelay(1500 / portTICK_PERIOD_MS);
+                displayError(String("JSON Parse Failed: ") + error.c_str());
                 _doc.clear();
                 resumeInputHandlerTask();
                 return false;
@@ -591,8 +579,7 @@ bool getInfo(const String &serverUrl, JsonDocument &_doc, JsonDocument *filter =
         // The connection may have dropped mid-flow; abort early instead of burning
         // the remaining attempts (each can block up to the HTTP timeout).
         if (!launcherWifiIsConnected()) {
-            displayRedStripe("WiFi lost during fetch");
-            vTaskDelay(1500 / portTICK_PERIOD_MS);
+            displayError("WiFi lost during fetch");
             resumeInputHandlerTask();
             return false;
         }
@@ -601,8 +588,7 @@ bool getInfo(const String &serverUrl, JsonDocument &_doc, JsonDocument *filter =
         vTaskDelay(pdTICKS_TO_MS(500));
     }
 
-    displayRedStripe("Server unreachable");
-    vTaskDelay(1500 / portTICK_PERIOD_MS);
+    displayError("Server unreachable");
     resumeInputHandlerTask();
     return false;
 }
@@ -654,17 +640,13 @@ bool GetJsonFromLauncherHub(uint8_t page, const String &order, bool star, const 
         RAM_LOG("firmwareList-doc-resident");
         return true;
     }
-    displayRedStripe("Firmware list fetch Failed");
-    vTaskDelay(1500 / portTICK_PERIOD_MS);
+    displayError("Firmware list fetch Failed");
     return false;
 }
 JsonDocument getVersionInfo(const String &fid) {
     JsonDocument versions(launcherJsonAllocator());
     String serverUrl = "https://api.launcherhub.net/firmwares?fid=" + fid;
-    if (!getInfo(serverUrl, versions)) {
-        displayRedStripe("Version fetch Failed");
-        vTaskDelay(1500 / portTICK_PERIOD_MS);
-    }
+    if (!getInfo(serverUrl, versions)) displayError("Version fetch Failed");
     return versions;
 }
 
@@ -672,13 +654,14 @@ JsonDocument getVersionInfo(const String &fid) {
 // OTA install. Returns empty when the payload is embedded in the app image (manifest
 // "source" is "firmware" or absent); otherwise the direct URL of the matching
 // install.sources entry (e.g. a standalone SPIFFS/LittleFS image).
+static String buildSourceUrl(const String &fid, const String &sourceUrl, bool useProxy);
+
 static String resolveDataPartitionSource(JsonObject part, JsonObject sources) {
     String src = part["source"].as<String>();
     if (src.isEmpty() || src == "firmware" || sources.isNull()) return String();
     String url = sources[src].as<String>();
     if (url.isEmpty()) return String();
-    if (!url.startsWith("https://")) url = M5_SERVER_PATH + url;
-    return url;
+    return buildSourceUrl(String(), url, false);
 }
 
 void installFirmwareFromManifest(const String &fid, const String &version, String installedName) {
@@ -688,8 +671,7 @@ void installFirmwareFromManifest(const String &fid, const String &version, Strin
     String serverUrl =
         "https://api.launcherhub.net/firmwares?fid=" + fid + "&version=" + encodeQueryValue(version);
     if (!getInfo(serverUrl, detail)) {
-        displayRedStripe("Install info failed");
-        launcherDelayMs(2000);
+        displayError("Install info failed");
         return;
     }
 
@@ -700,8 +682,7 @@ void installFirmwareFromManifest(const String &fid, const String &version, Strin
     JsonObject sources = install["sources"].as<JsonObject>();
     String file = versionObj["file"].as<String>();
     if (file.isEmpty() || app.isNull()) {
-        displayRedStripe("Bad install info");
-        launcherDelayMs(2000);
+        displayError("Bad install info");
         return;
     }
 
@@ -759,8 +740,7 @@ void installFirmwareFromManifest(const String &fid, const String &version, Strin
     }
 
     if (appCopySize == 0 || appPartitionSize == 0) {
-        displayRedStripe("Invalid app size");
-        launcherDelayMs(2000);
+        displayError("Invalid app size");
         return;
     }
 
@@ -821,8 +801,7 @@ bool checkForUpdates() {
 
     File f = SDM.open(path, FILE_READ);
     if (!f) {
-        displayRedStripe("No downloads found");
-        launcherDelayMs(1500);
+        displayError("No downloads found");
         return false;
     }
     String body;
@@ -830,8 +809,7 @@ bool checkForUpdates() {
     f.close();
 
     if (body.isEmpty() || body == "[]" || body == "[{}]") {
-        displayRedStripe("No downloads found");
-        launcherDelayMs(1500);
+        displayError("No downloads found");
         return false;
     }
 
@@ -844,8 +822,7 @@ bool checkForUpdates() {
     resumeInputHandlerTask();
 
     if (!ok || response.isEmpty()) {
-        displayRedStripe("Update check failed");
-        launcherDelayMs(1500);
+        displayError("Update check failed");
         return false;
     }
 
@@ -856,16 +833,14 @@ bool checkForUpdates() {
     DeserializationError err = deserializeJson(doc, response, DeserializationOption::Filter(filter));
     RAM_LOG("updateList-after-parse");
     if (err) {
-        displayRedStripe("Bad server response");
-        launcherDelayMs(1500);
+        displayError("Bad server response");
         return false;
     }
 
     total_firmware = doc["total"] | 0;
 
     if (total_firmware == 0) {
-        displayRedStripe("No updates found");
-        launcherDelayMs(1500);
+        displayError("No updates found");
         return false;
     }
 
@@ -955,6 +930,31 @@ static bool mergedDownloadCb(const uint8_t *data, size_t len, void *ctx) {
     return true;
 }
 
+static void waitOrDelay(bool autoAdvance, uint16_t delayMs) {
+    if (autoAdvance) launcherDelayMs(delayMs);
+    else
+        while (!check(SelPress)) yield();
+}
+
+static bool reportDownloadOutcome(
+    bool ok, const String &filePath, const String &folder, const String &fid, const String &version,
+    bool autoAdvance, const char *successLog
+) {
+    if (!ok) {
+        SDM.remove(filePath);
+        displayRedStripe("Download FAILED");
+        waitOrDelay(autoAdvance, 1500);
+        return false;
+    }
+
+    progressHandler(100, 100);
+    launcherConsolePrintln(successLog);
+    saveDownloadedFirmware(folder, fid, version);
+    displayRedStripe(" Downloaded ");
+    waitOrDelay(autoAdvance, 1000);
+    return true;
+}
+
 // Pads the merged file with 0xFF from the current write position up to `target`.
 static bool padMergedFile(File &file, size_t &pos, size_t target) {
     if (pos > target) return false; // components overlap: malformed manifest
@@ -966,6 +966,13 @@ static bool padMergedFile(File &file, size_t &pos, size_t target) {
         pos += chunk;
     }
     return true;
+}
+
+static String buildSourceUrl(const String &fid, const String &sourceUrl, bool useProxy) {
+    String url = sourceUrl;
+    if (!url.startsWith("https://")) url = M5_SERVER_PATH + url;
+    if (useProxy && !fid.isEmpty()) url = "https://api.launcherhub.net/download?fid=" + fid + "&file=" + url;
+    return url;
 }
 
 // Downloads a single source URL into `file` at absolute flash `offset`, padding
@@ -984,9 +991,7 @@ static bool mergeSourceIntoFile(
         );
         return false;
     }
-    String url = sourceUrl;
-    if (!url.startsWith("https://")) url = M5_SERVER_PATH + url;
-    if (useProxy && !fid.isEmpty()) url = "https://api.launcherhub.net/download?fid=" + fid + "&file=" + url;
+    String url = buildSourceUrl(fid, sourceUrl, useProxy);
 
     LauncherHttpResponse resp;
     MergedDownloadContext ctx = {&file, &pos, 0, 0, 0, &resp, captureBuf, captureStart, captureLen};
@@ -1027,7 +1032,7 @@ static uint32_t firstDataPartitionOffsetFromTable(const uint8_t *table, size_t l
 **                           data image is appended at the offset declared inside the
 **                           factory image's embedded partition table (0x8000).
 ***************************************************************************************/
-static bool downloadSplitFirmware(
+static bool __attribute__((noinline)) downloadSplitFirmware(
     const String &fid, JsonObject install, const String &filePath, const String &folder,
     const String &version, bool autoAdvance
 ) {
@@ -1063,8 +1068,7 @@ static bool downloadSplitFirmware(
 
     File file = SDM.open(filePath, FILE_WRITE);
     if (!file) {
-        displayRedStripe("Fail creating file.");
-        launcherDelayMs(2000);
+        displayError("Fail creating file.");
         return false;
     }
 
@@ -1119,23 +1123,9 @@ static bool downloadSplitFirmware(
     file.flush();
     file.close();
 
-    if (!ok) {
-        SDM.remove(filePath);
-        displayRedStripe("Download FAILED");
-        if (autoAdvance) launcherDelayMs(1500);
-        else
-            while (!check(SelPress)) yield();
-        return false;
-    }
-
-    progressHandler(100, 100);
-    launcherConsolePrintln("Merged firmware assembled..");
-    saveDownloadedFirmware(folder, fid, version);
-    displayRedStripe(" Downloaded ");
-    if (autoAdvance) launcherDelayMs(1000);
-    else
-        while (!check(SelPress)) yield();
-    return true;
+    return reportDownloadOutcome(
+        ok, filePath, folder, fid, version, autoAdvance, "Merged firmware assembled.."
+    );
 }
 
 void downloadFirmware(
@@ -1143,15 +1133,12 @@ void downloadFirmware(
     bool autoAdvance
 ) {
     displayRedStripe("Preparing..");
-    if (!file_url.startsWith("https://")) file_url = M5_SERVER_PATH + file_url;
-    String fileAddr = "https://api.launcherhub.net/download?fid=" + fid + "&file=" + file_url;
-    if (fid == "") fileAddr = file_url;
+    String fileAddr = buildSourceUrl(fid, file_url, true);
     int tries = 0;
     fileName = replaceChars(fileName);
     prog_handler = 2;
     if (!setupSdCard()) {
-        displayRedStripe("SDCard Not Found");
-        launcherDelayMs(2500);
+        displayError("SDCard Not Found");
         return;
     }
     if (!folder.endsWith("/")) folder = folder + "/";
@@ -1161,8 +1148,7 @@ void downloadFirmware(
         if (!SDM.exists(folder_name)) {
             if (!SDM.mkdir(folder_name)) {
                 launcherConsolePrintf("Download: Couldn't create folder '%s'\n", folder_name.c_str());
-                displayRedStripe("Can't create: '" + folder_name + "'");
-                launcherDelayMs(2000);
+                displayError("Can't create: '" + folder_name + "'");
                 return;
             }
         }
@@ -1195,8 +1181,7 @@ retry:
     file = SDM.open(filePath, FILE_WRITE);
     if (!file) {
         launcherConsolePrintf("Download: Couldn't create file %s", filePath.c_str());
-        displayRedStripe("Fail creating file.");
-        launcherDelayMs(2000);
+        displayError("Fail creating file.");
         return;
     }
     LauncherHttpResponse response;
@@ -1219,21 +1204,8 @@ retry:
         SDM.remove(filePath);
         goto retry;
     }
-    if (!ok || (response.content_length > 0 && sdSize != (size_t)response.content_length)) {
-        SDM.remove(filePath);
-        displayRedStripe("Download FAILED");
-        if (autoAdvance) launcherDelayMs(1500);
-        else
-            while (!check(SelPress)) yield();
-    } else {
-        progressHandler(100, 100);
-        launcherConsolePrintln("File successfully downloaded..");
-        saveDownloadedFirmware(folder, fid, version);
-        displayRedStripe(" Downloaded ");
-        if (autoAdvance) launcherDelayMs(1000);
-        else
-            while (!check(SelPress)) yield();
-    }
+    ok = ok && !(response.content_length > 0 && sdSize != (size_t)response.content_length);
+    reportDownloadOutcome(ok, filePath, folder, fid, version, autoAdvance, "File successfully downloaded..");
     wakeUpScreen();
 }
 /***************************************************************************************
@@ -1247,8 +1219,7 @@ bool installExtFirmware(const String &url) {
     uint8_t bytes[32];
     uint8_t buff[bufSize]; // on-demand range/parse buffer (was a resident global, see docs/milestone_2.md)
     if (!url.startsWith("http")) {
-        displayRedStripe("Invalid link");
-        launcherDelayMs(2000);
+        displayError("Invalid link");
         return false;
     }
     displayRedStripe("Getting file info");
@@ -1256,8 +1227,7 @@ bool installExtFirmware(const String &url) {
     RangeBufferContext range = {buff, bufSize, 0};
     if (!launcherHttpGetRange(url.c_str(), 32768, 416, rangeBufferCb, &range, &response) ||
         response.status != 206) {
-        displayRedStripe("File not found");
-        launcherDelayMs(2000);
+        displayError("File not found");
         return false;
     }
     if (!parseContentRangeTotal(response.content_range, file_size)) return false;
@@ -1371,8 +1341,7 @@ bool installFAT_OTA(String file, uint32_t offset, uint32_t size, const char *lab
     const esp_partition_t *partition =
         esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, label);
     if (!partition) {
-        displayRedStripe("Partition not found");
-        launcherDelayMs(2500);
+        displayError("Partition not found");
         return false;
     }
 
