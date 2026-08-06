@@ -135,6 +135,7 @@ std::vector<Option> options;
 #include "onlineLauncher.h"
 #include "partitioner.h"
 #include "sd_functions.h"
+#include "serial_console.h"
 #include "settings.h"
 #include "webInterface.h"
 
@@ -157,7 +158,11 @@ void _post_setup_gpio() {}
 **  Where the devices are started and variables set
 *********************************************************************/
 void setup() {
+    Serial.setRxBufferSize(8192);
     Serial.begin(115200);
+#if ARDUINO_USB_CDC_ON_BOOT
+    Serial.setTxTimeoutMs(0);
+#endif
     RAM_LOG("setup-start");
     nvs_flash_init();
     launcherPartitionInitDefaultSizes();
@@ -271,11 +276,28 @@ void setup() {
     xHandle = nullptr;
 #endif
 
+    // Command interface over the Serial Monitor (nav/reboot/partitions/flash), always
+    // on so a host script can steer the Launcher before it auto-boots a queued OTA app.
+    static TaskHandle_t serialConsoleHandle;
+    xTaskCreate(
+        taskSerialConsole, // Task function
+        "SerialConsole",   // Task Name
+        4096,              // Stack size
+        NULL,              // Task parameters
+        1,                 // Task priority, below InputHandler/loopTask
+        &serialConsoleHandle
+    );
+
     // Start Bootscreen timer
     int i = launcherMillis();
     int j = 0;
     LongPress = true;
     RAM_LOG("before-bootscreen");
+
+#if defined(HAS_KEYBOARD) || defined(USE_CARDKB2)
+    std::vector<LauncherAppMetadata> bootApps = launcherListInstalledApps();
+#endif
+
     while (launcherMillis() < i + (2000 + bootToApp * 3000)) { // increased from 2500 to 5000
         initDisplay();                                         // Inicia o display
 
@@ -284,9 +306,22 @@ void setup() {
             j++;
         }
 #if defined(HAS_TOUCH)
-        // Enable touch the center of the screen to get into Launcher
         if (touchPoint.pressed) {
             LTouchPoint *t = &touchPoint;
+
+            // Tap on one of the app shortcut cards: boot that app directly
+            bool shortcutHit = false;
+            for (MenuOptions &shortcut : launcherBootAppShortcuts()) {
+                if (shortcut.contain(t->x, t->y)) {
+                    touchPoint.pressed = false;
+                    shortcut.action();
+                    shortcutHit = true;
+                    break;
+                }
+            }
+            if (shortcutHit) continue;
+
+            // Enable touch the center of the screen to get into Launcher
             int third_x = tftWidth / 3;
             int third_y = tftHeight / 3;
             if (t->x > third_x * 1 && t->x < third_x * 2 && ((t->y > third_y && t->y < third_y * 2))) {
@@ -307,26 +342,41 @@ void setup() {
             goto Launcher;
         }
 
-#if defined(HAS_KEYBOARD)
+#if defined(HAS_KEYBOARD) || defined(USE_CARDKB2)
         keyStroke key = _getKeyPress();
-        if (key.pressed && !key.enter)
+        bool anyKeyTriggered = key.pressed && !key.enter;
 #elif defined(HAS_1_BUTTON)
-        if (check(EscPress))
+        bool anyKeyTriggered = check(EscPress);
 #elif defined(STICK_C_PLUS2) || defined(STICK_C_PLUS)
-        if (check(NextPress))
+        bool anyKeyTriggered = check(NextPress);
 #else
-        if (check(AnyKeyPress))
+        bool anyKeyTriggered = check(AnyKeyPress);
 #endif
-        {
+        if (anyKeyTriggered) {
+#if defined(HAS_KEYBOARD) || defined(USE_CARDKB2)
+            // Digit shortcut: 1..9,0 boots straight into that slot's installed app.
+            int appIndex = -1;
+            if (!key.word.empty()) {
+                char digit = key.word[0];
+                if (digit >= '1' && digit <= '9') appIndex = digit - '1';
+                else if (digit == '0') appIndex = 9;
+            }
+            if (appIndex >= 0 && appIndex < static_cast<int>(bootApps.size())) {
+                launcherBootAppByLabel(bootApps[appIndex].label.c_str());
+                goto Launcher;
+            }
+#endif
             launcherBootInstalledAppOrShowMenu();
             goto Launcher;
         }
+        vTaskDelay(pdMS_TO_TICKS(10)); // time to inputTask
     }
     // If nothing is done and there's something installed, launch it
     if (launcherBootCurrentApp()) {
         tft->fillScreen(BGCOLOR);
         _setBrightness(0);
-        reboot();
+
+        return (void)releaseHeapObjectsAndReboot();
     }
 
 // If M5 or Enter button is pressed, continue from here
@@ -357,6 +407,7 @@ void loop() {
     int pass_by = 0;
     bool first_loop = true;
     getBrightness();
+    launcherConsolePrintln("Type 'help' for Serial commands.");
     if (!sdcardMounted) index = 1; // if SD card is not present, paint SD square grey and auto select OTA
     std::vector<MenuOptions> menuItems = {
         {
@@ -459,7 +510,7 @@ void loop() {
                 update_sd = sdcardMounted;
             }
             if (!dev_mode && pass_by == 5) {
-                displayError("Dev mode Activated");
+                displayMsg("Dev mode Activated");
                 dev_mode = true;
             }
             drawMainMenu(menuItems, index);
@@ -566,18 +617,35 @@ void loop() {
             redraw = true;
             goto END;
         }
-        checkReboot();
-#if defined(HAS_RESISTIVE_TOUCH)
-        if (Serial.available() > 0) {
-            String msg = Serial.readStringUntil('\n');
-            msg.trim();
 
-            if (msg == "calibrate") {
-                launcherConsolePrintln("Starting calibration..");
-                calibrateTouch();
+#if defined(HAS_KEYBOARD)
+        // Boot a file bound to a keyboard shortcut (Settings -> Manage shortcuts / SD "Bind to key")
+        {
+            keyStroke key = _getKeyPress();
+            if (key.pressed && !key.enter && !key.exit_key && !key.word.empty()) {
+                char pressedChar = key.word[0];
+                if (pressedChar >= 'A' && pressedChar <= 'Z') pressedChar += ('a' - 'A');
+                String pressedKey = String(pressedChar);
+                String boundPath;
+                if (sdcardMounted && getKeyBinding(pressedKey, boundPath)) {
+                    if (SDM.exists(boundPath)) {
+                        updateFromSD(boundPath); // reboots on success; only returns on failure
+                    } else {
+                        displayError("File not found");
+                        removeKeyBinding(pressedKey);
+                        displayMsg(String("'") + pressedKey + "' removed");
+                    }
+                    tft->drawPixel(0, 0, 0);
+                    tft->fillScreen(BGCOLOR);
+                    pass_by = 0;
+                    returnToMenu = false;
+                    redraw = true;
+                    goto END;
+                }
             }
         }
 #endif
+        checkReboot();
     }
 
 END:
@@ -687,6 +755,8 @@ void loop() { // Start SD card, If there's no SD Card installed, see if there's 
     if (launcherWifiIsConnected()) mode_ap = false;
 
     startWebUi("", 0, mode_ap);
+
+    launcherConsolePrintln("Type 'help' for Serial commands.");
 
     // sorfware will keep trapped in startWebUi loop..
 }

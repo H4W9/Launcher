@@ -108,7 +108,7 @@ bool patchLittlefsRootCommit(uint8_t *block, uint32_t blockSize, uint32_t newBlo
             if (!sawSuperblock) return false;
 
             const uint32_t oldBlockCount = readLe32(block + kLittlefsBlockCountOffset);
-            if (oldBlockCount <= newBlockCount) return true;
+            if (oldBlockCount == newBlockCount) return true;
 
             writeLe32(block + kLittlefsBlockCountOffset, newBlockCount);
 
@@ -171,7 +171,7 @@ bool launcherPatchReducedLittlefsSuperblocks(
     if (partitionSize % blockSize != 0) return true;
 
     const uint32_t newBlockCount = partitionSize / blockSize;
-    if (newBlockCount == 0 || newBlockCount >= blockCount) return true;
+    if (newBlockCount == 0 || newBlockCount == blockCount) return true;
 
     const uint32_t rewriteSize = alignUp(std::min(partitionSize, blockSize * 2), LAUNCHER_FLASH_SECTOR_SIZE);
     std::unique_ptr<uint8_t[]> buffer(new (std::nothrow) uint8_t[rewriteSize]);

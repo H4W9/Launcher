@@ -11,6 +11,7 @@
 #include "partition_table_model.h"
 #include "ram_profile.h"
 #include "settings.h"
+#include "utils.h"
 #include <algorithm>
 #include <esp_app_format.h>
 #include <esp_image_format.h>
@@ -94,6 +95,7 @@ bool deleteFromSd(const String &path) {
         } else {
             success &= SDM.remove(fullPath.c_str());
         }
+        yield(); // large folders can take long enough to trip the task watchdog
         fullPath = dir.getNextFileName(&isDir);
     }
 
@@ -280,6 +282,47 @@ void readFs(String &folder, std::vector<Option> &opt) {
     std::sort(opt.begin(), opt.end(), sortList);
     opt.push_back({"> Back", [&]() { fileToUse = ""; }, ALCOLOR});
 }
+#if defined(HAS_KEYBOARD)
+#ifndef RESERVED_NAV_KEYS
+#define RESERVED_NAV_KEYS ""
+#endif
+static bool isReservedBindKey(char c) {
+    for (const char *p = RESERVED_NAV_KEYS; *p; ++p) {
+        if (*p == c) return true;
+    }
+    return false;
+}
+
+static bool captureBindKey(char &outKey) {
+    displayRedStripe("Press a key to bind...");
+    while (true) {
+        keyStroke key = _getKeyPress();
+        if (key.pressed) {
+            if (key.exit_key) return false;
+            if (!key.enter && !key.word.empty()) {
+                char candidate = key.word[0];
+                if (candidate >= 'A' && candidate <= 'Z') candidate += ('a' - 'A');
+                if (isReservedBindKey(candidate)) {
+                    displayRedStripe("Key reserved for navigation");
+                    continue;
+                }
+                outKey = candidate;
+                return true;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
+static void bindFileToKeyMenu(const String &path) {
+    char keyChar = 0;
+    if (!captureBindKey(keyChar)) return;
+    String key = String(keyChar);
+    setKeyBinding(key, path);
+    displayMsg(String("'") + key + "' bound");
+}
+#endif
+
 /*********************************************************************
 **  Function: loopSD
 **  Where you choose what to do wuth your SD Files
@@ -428,6 +471,15 @@ RESTART:
             {"Rename",     [=]() { renameFile(fileToUse, options[index].label); }},
             {"Copy",       [=]() { copyFile(fileToUse); }                        },
         };
+#if defined(HAS_KEYBOARD)
+        {
+            String upperFile = fileToUse;
+            upperFile.toUpperCase();
+            if (upperFile.endsWith(".BIN")) {
+                opt.insert(opt.begin() + 1, {"Bind to key", [=]() { bindFileToKeyMenu(fileToUse); }});
+            }
+        }
+#endif
         if (fileToCopy != "") opt.push_back({"Paste", [=]() { pasteFile(Folder); }});
         opt.push_back({"Delete", [=]() { deleteFromSd(fileToUse); }});
         opt.push_back({"Main Menu", [=]() { returnToMenu = true; }});
@@ -462,10 +514,30 @@ static bool flashRawFromSd(
         size_t toRead = min(bufferSize, imageSize - written);
         int bytesRead = file.readBytes(reinterpret_cast<char *>(buf.get()), toRead);
         if (bytesRead <= 0) {
+            launcherDelayMs(20);
+            if (!file.seek(sourceOffset + written)) {
+                launcherConsolePrintf(
+                    "SD read failed at offset 0x%08X (re-seek failed)\n", (unsigned)(sourceOffset + written)
+                );
+                launcherRawUpdateEnd();
+                return false;
+            }
+            bytesRead = file.readBytes(reinterpret_cast<char *>(buf.get()), toRead);
+        }
+        if (bytesRead <= 0) {
+            launcherConsolePrintf("SD read failed at offset 0x%08X\n", (unsigned)(sourceOffset + written));
             launcherRawUpdateEnd();
             return false;
         }
-        if (launcherRawUpdateWrite(buf.get(), bytesRead) != static_cast<size_t>(bytesRead)) return false;
+        if (launcherRawUpdateWrite(buf.get(), bytesRead) != static_cast<size_t>(bytesRead)) {
+            launcherConsolePrintf(
+                "Flash write failed at partition offset 0x%08X (%s)\n",
+                (unsigned)written,
+                launcherUpdateLastErrorName()
+            );
+            launcherRawUpdateEnd();
+            return false;
+        }
         written += bytesRead;
         progressHandler(written, imageSize);
         launcherDelayMs(1);
@@ -511,6 +583,22 @@ boundedSdPartitionPayload(File &file, uint32_t offset, uint32_t declaredSize, ui
     if (offset == 0 || file.size() <= offset || declaredSize == 0) return 0;
     uint32_t availableSize = file.size() - offset;
     return launcherPartitionBoundedPayloadSize(declaredSize, 0, maxSize, availableSize);
+}
+
+// A partition table entry can be present without actually carrying payload (e.g. the
+// image was built with an empty/erased data partition). Treat it as empty when its
+// first bytes are all-0xFF or all-0x00, so callers don't size/copy for data that isn't there.
+static bool sdPartitionIsEmpty(File &file, uint32_t offset) {
+    if (offset == 0 || file.size() <= offset) return true;
+    uint8_t buffer[16];
+    uint32_t len = std::min<uint32_t>(sizeof(buffer), file.size() - offset);
+    if (!readSdBytes(file, offset, buffer, len)) return true;
+    bool allFF = true, allZero = true;
+    for (uint32_t i = 0; i < len; ++i) {
+        if (buffer[i] != 0xFF) allFF = false;
+        if (buffer[i] != 0x00) allZero = false;
+    }
+    return allFF || allZero;
 }
 
 static bool measureSdEspImage(File &file, uint32_t imageOffset, uint32_t &imageSize) {
@@ -615,7 +703,6 @@ static bool installFromSdDynamic(
 
     pauseSdInstallInput();
     bool success = false;
-    displayRedStripe("Installing APP");
     prog_handler = 0;
     if (!flashRawFromSd(file, appOffset, appSize, appEntry, true)) {
         displayError(String("APP: ") + launcherUpdateLastErrorName());
@@ -709,7 +796,6 @@ static bool installFromSdDynamic(
             bkInfo.partitions.push_back(part);
         }
         saveInstalledToConfig(bkInfo);
-        if (autoBackup && !bkInfo.partitions.empty() && !shouldRestore) { backupAllPartitionsForApp(appNum); }
     }
 
     success = true;
@@ -740,8 +826,8 @@ void updateFromSD(const String &path) {
         if (!installFromSdDynamic(file, path, app_size, 0, dataPartitions)) { goto Exit; }
         file.close();
         tft->fillScreen(BGCOLOR);
-        FREE_TFT
-        reboot();
+
+        return (void)releaseHeapObjectsAndReboot();
     } else {
         if (!file.seek(0x8000)) goto Exit;
         for (int i = 0; i < LAUNCHER_PARTITION_TABLE_SIZE; i += LAUNCHER_PARTITION_ENTRY_SIZE) {
@@ -780,25 +866,39 @@ void updateFromSD(const String &path) {
                 const uint32_t declaredSize = readLe32(partitionEntry + 0x08);
                 String declaredLabel = readPartitionLabel(partitionEntry);
                 dp.label = declaredLabel.isEmpty() ? "spiffs" : declaredLabel;
-                // Use the full declared size for "assets" partitions (e.g. xiaozhi-esp32)
-                if (dp.label == "assets" && declaredSize > LAUNCHER_DEFAULT_SPIFFS_SIZE) {
+                const bool partitionEmpty = sdPartitionIsEmpty(file, dp.sourceOffset);
+                // accept data partitions as they are if not "spiffs", unless there's no actual
+                // payload to justify the declared size
+                if (partitionEmpty && declaredSize <= LAUNCHER_DEFAULT_SPIFFS_THRESHOLD) {
+                    dp.partitionSize = LAUNCHER_DEFAULT_SPIFFS_SIZE;
+                } else if (dp.label != "spiffs" && declaredSize > LAUNCHER_DEFAULT_SPIFFS_SIZE) {
                     dp.partitionSize = declaredSize;
                 } else if (declaredSize > LAUNCHER_DEFAULT_SPIFFS_THRESHOLD) {
                     dp.partitionSize = LAUNCHER_INSTALL_USE_REMAINING_SPIFFS_SIZE;
                 } else {
                     dp.partitionSize = LAUNCHER_DEFAULT_SPIFFS_SIZE;
                 }
-                dp.copySize = boundedSdPartitionPayload(
-                    file,
-                    dp.sourceOffset,
-                    declaredSize,
-                    dp.partitionSize == LAUNCHER_INSTALL_USE_REMAINING_SPIFFS_SIZE ? declaredSize
-                                                                                   : dp.partitionSize
-                );
+                dp.copySize = partitionEmpty
+                                  ? 0
+                                  : boundedSdPartitionPayload(
+                                        file,
+                                        dp.sourceOffset,
+                                        declaredSize,
+                                        dp.partitionSize == LAUNCHER_INSTALL_USE_REMAINING_SPIFFS_SIZE
+                                            ? declaredSize
+                                            : dp.partitionSize
+                                    );
                 if (file.size() < dp.sourceOffset) {
                     dp.copySize = 0;
                     launcherConsolePrintf(
                         "Found SPIFFS table entry without payload: create 0x%06X, copy 0\n", dp.partitionSize
+                    );
+                } else if (partitionEmpty) {
+                    launcherConsolePrintf(
+                        "Found empty %s partition at 0x%06X: create 0x%06X, copy 0\n",
+                        dp.label.c_str(),
+                        dp.sourceOffset,
+                        dp.partitionSize
                     );
                 }
                 dataPartitions.push_back(dp);
@@ -832,7 +932,7 @@ void updateFromSD(const String &path) {
         {
             auto spiffsIt = std::find_if(
                 dataPartitions.begin(), dataPartitions.end(), [](const LauncherInstallDataPartition &d) {
-                    return d.subtype != 0x81;
+                    return d.subtype != 0x81 && d.label == "spiffs";
                 }
             );
             if (spiffsIt != dataPartitions.end()) {
@@ -860,9 +960,9 @@ void updateFromSD(const String &path) {
         log_i("Data partitions: %d", dataPartitions.size());
 
         if (!installFromSdDynamic(file, path, app_size, app_offset, dataPartitions)) { goto Exit; }
-        displayError("Complete");
-        FREE_TFT
-        reboot();
+        displayMsg("Complete");
+
+        return (void)releaseHeapObjectsAndReboot();
     }
 Exit:
     displayError("Update Error.");

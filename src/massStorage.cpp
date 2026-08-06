@@ -41,7 +41,7 @@ constexpr tusb_desc_device_t kDeviceDescriptor = {
     0x00, // bDeviceClass    - defined at interface level (fixes macOS MSC enumeration)
     0x00, // bDeviceSubClass - defined at interface level
     0x00, // bDeviceProtocol - defined at interface level
-    CFG_TUD_ENDOINT0_SIZE,
+    CFG_TUD_ENDPOINT0_SIZE,
     0x303A,
     0x1001,
     0x0100,
@@ -106,6 +106,7 @@ void restoreUsbSerial() {
 #endif
 #if ARDUINO_USB_CDC_ON_BOOT
     Serial.begin(115200);
+    Serial.setTxTimeoutMs(0); // avoid blocking writes when host isn't reading the CDC port
 #endif
 }
 
@@ -257,7 +258,7 @@ void MassStorage::setup() {
     displayMessage("Mounting...");
 
     setShouldStop(false);
-    SDM.end(); // Forces SDCard mounting again.
+
     if (!setupSdCard()) {
         displayError("SD card not found.");
         return;
@@ -265,7 +266,7 @@ void MassStorage::setup() {
 
     beginUsb();
 
-    vTaskDelay(pdTICKS_TO_MS(500));
+    vTaskDelay(pdTICKS_TO_MS(100));
     return loop();
 }
 

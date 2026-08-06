@@ -167,7 +167,7 @@ void powerOff() {
          }                                           },
         {"Power Off",
          []() {
-             displayError("Connect to USB to pwr on");
+             displayMsg("Connect to USB to pwr on");
              for (int i = 3; i > 0; i--) {
                  displayRedStripe("Shutting down in " + String(i));
                  launcherDelayMs(1000);

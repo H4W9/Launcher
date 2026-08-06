@@ -1,6 +1,5 @@
 #include "onlineLauncher.h"
 #include "app_registry.h"
-#include "backup_manager.h"
 #include "display.h"
 #include "idf/idf_http_client.h"
 #include "idf/idf_update.h"
@@ -271,7 +270,14 @@ void pauseInputHandlerTask() {
 void resumeInputHandlerTask() {
     if (!xHandle || inputHandlerPauseDepth == 0) return;
     inputHandlerPauseDepth--;
-    if (inputHandlerPauseDepth == 0) vTaskResume(xHandle);
+    if (inputHandlerPauseDepth == 0) {
+        // Time spent suspended is not idle time. checkPowerSaveTime() lives in the very
+        // task we froze, so the screen-off deadline went on ageing with nothing able to
+        // act on it; the first tick after the resume finds it long past and blanks the
+        // display just as the outcome — often an error — reaches the screen.
+        wakeUpScreen();
+        vTaskResume(xHandle);
+    }
 }
 
 bool discardHttpCb(const uint8_t *, size_t, void *) { return true; }
@@ -286,10 +292,23 @@ bool parseContentRangeTotal(const char *contentRange, size_t &total) {
 }
 
 bool getRemoteFileSize(const String &url, size_t &size, const char *hwid = nullptr) {
-    LauncherHttpResponse response;
-    if (!launcherHttpGetRange(url.c_str(), 0, 1, discardHttpCb, nullptr, &response, hwid)) return false;
-    if (response.status != 206) return false;
-    return parseContentRangeTotal(response.content_range, size);
+    String activeUrl = url;
+    for (uint8_t attempt = 0; attempt < 2; ++attempt) {
+        LauncherHttpResponse response;
+        bool ok = launcherHttpGetRange(activeUrl.c_str(), 0, 1, discardHttpCb, nullptr, &response, hwid);
+        if (ok && response.status == 206) return parseContentRangeTotal(response.content_range, size);
+        // A redirect the device can't follow is api.launcherhub.net's answer, not a
+        // hiccup on the CDN side; fall back to /proxy (server-side fetch) once
+        // instead of failing the whole install before it even starts.
+        const bool unfollowedRedirect = response.status >= 300 && response.status < 400;
+        if (attempt == 0 && unfollowedRedirect && activeUrl.indexOf("/download?") >= 0) {
+            activeUrl.replace("/download?", "/proxy?");
+            launcherConsolePrintf("Redirect not followed, falling back to /proxy for size probe\n");
+            continue;
+        }
+        return false;
+    }
+    return false;
 }
 
 struct FileDownloadContext {
@@ -316,7 +335,20 @@ bool fileDownloadCb(const uint8_t *data, size_t len, void *ctx) {
     while (totalWrote < len) {
         const size_t part = min(sdWriteChunk, len - totalWrote);
         size_t wrote = download->file->write(data + totalWrote, part);
-        if (wrote != part) return false;
+        if (wrote != part) {
+            download->file->flush();
+            vTaskDelay(pdMS_TO_TICKS(20));
+            wrote = download->file->write(data + totalWrote, part);
+        }
+        if (wrote != part) {
+            launcherConsolePrintf(
+                "Download: SD write failed at pos 0x%06X (%u/%u bytes)\n",
+                (unsigned)(download->downloaded + totalWrote),
+                (unsigned)wrote,
+                (unsigned)part
+            );
+            return false;
+        }
         totalWrote += wrote;
     }
     download->downloaded += totalWrote;
@@ -369,23 +401,58 @@ bool launcherRawUpdateHttpCb(const uint8_t *data, size_t len, void *ctx) {
 
 bool flashRawRangeFromHttp(
     const String &url, uint32_t sourceOffset, size_t imageSize, const LauncherPartitionEntry &target,
-    bool appImage, const char *hwid = nullptr
+    bool appImage, const char *hwid = nullptr, String *errorOut = nullptr
 ) {
     pauseInputHandlerTask();
     RawHttpUpdateContext update = {target.offset, target.size, imageSize, 0, appImage, false};
     bool httpOk = false;
     LauncherHttpResponse response;
+    String activeUrl = url;
+    bool triedProxyFallback = false;
     constexpr uint8_t maxAttempts = 24;
     for (uint8_t attempt = 0; update.written < imageSize && attempt < maxAttempts; ++attempt) {
         size_t before = update.written;
         const uint32_t requestOffset = sourceOffset + update.written;
         const size_t remaining = imageSize - update.written;
         response = LauncherHttpResponse();
+        RAM_LOG("flashRawRangeFromHttp-attempt");
         httpOk = launcherHttpGetRange(
-            url.c_str(), requestOffset, remaining, launcherRawUpdateHttpCb, &update, &response, hwid
+            activeUrl.c_str(), requestOffset, remaining, launcherRawUpdateHttpCb, &update, &response, hwid
         );
+        if (!httpOk) {
+            launcherConsolePrintf(
+                "HTTP range fetch failed offset=%u remaining=%u written=%u/%u status=%d transport_err=%d\n",
+                requestOffset,
+                static_cast<unsigned>(remaining),
+                static_cast<unsigned>(update.written),
+                static_cast<unsigned>(imageSize),
+                response.status,
+                response.transport_error
+            );
+        }
         if (httpOk && update.written == imageSize) break;
-        if (update.written == before) break;
+        if (update.written == before) {
+            const bool unfollowedRedirect = response.status >= 300 && response.status < 400;
+            if (unfollowedRedirect) {
+                // A redirect the device can't follow is api.launcherhub.net's answer,
+                // not a transient hiccup on the CDN side: /download sends the same
+                // Location every time, so trying it again cannot change anything. Switch
+                // to /proxy, where api.launcherhub.net fetches the CDN itself and streams
+                // the bytes back, and the device never opens that second connection at
+                // all. If /proxy redirects too, there is nothing left to try.
+                if (!triedProxyFallback && activeUrl.indexOf("/download?") >= 0) {
+                    activeUrl.replace("/download?", "/proxy?");
+                    triedProxyFallback = true;
+                    launcherConsolePrintln("Redirect not followed, falling back to /proxy");
+                } else {
+                    break;
+                }
+            } else if (response.status >= 400) {
+                // Any other non-2xx that produced no data is a definitive answer
+                // (repeating it cannot change it), whether from /download or /proxy.
+                break;
+            }
+        }
         launcherDelayMs(500);
     }
     bool complete = update.written == imageSize;
@@ -402,6 +469,21 @@ bool flashRawRangeFromHttp(
                 patchError.c_str()
             );
             ok = false;
+        }
+    }
+    if (!ok && errorOut) {
+        if (launcherUpdateLastError() != LAUNCHER_UPDATE_ERROR_OK) {
+            *errorOut = launcherUpdateLastErrorName();
+        } else if (!httpOk && response.transport_error != 0) {
+            *errorOut = String("HTTP transport error ") + response.transport_error;
+        } else if (!httpOk && response.status != 0) {
+            *errorOut = response.status >= 300 && response.status < 400
+                            ? String("Redirect ") + response.status + " not followed"
+                            : String("HTTP status ") + response.status;
+        } else if (!complete) {
+            *errorOut = String("Download incomplete (") + update.written + "/" + imageSize + ")";
+        } else {
+            *errorOut = "Unknown failure";
         }
     }
     resumeInputHandlerTask();
@@ -454,12 +536,16 @@ bool installFirmwareDynamic(
 
     pauseInputHandlerTask();
     bool success = false;
-    displayRedStripe("Installing APP");
     prog_handler = 0;
     progressHandler(0, updateSize);
-    if (!flashRawRangeFromHttp(fileAddr, nb ? 0 : appOffset, updateSize, appEntry, true, hwid.c_str())) {
-        displayError(String("APP: ") + launcherUpdateLastErrorName());
-        goto DONE;
+    {
+        String appError;
+        if (!flashRawRangeFromHttp(
+                fileAddr, nb ? 0 : appOffset, updateSize, appEntry, true, hwid.c_str(), &appError
+            )) {
+            displayError(String("APP: ") + appError);
+            goto DONE;
+        }
     }
 
     for (const auto &dp : dataPartitions) {
@@ -472,8 +558,11 @@ bool installFirmwareDynamic(
         // Data that ships as a separate file is fetched from its own URL at its own
         // source offset; embedded data keeps using the app image URL (fileAddr).
         const String &partAddr = dp.sourceUrl.isEmpty() ? fileAddr : dp.sourceUrl;
-        if (!flashRawRangeFromHttp(partAddr, dp.sourceOffset, copySize, dp.entry, false, hwid.c_str())) {
-            displayError(String(typeStr) + ": " + launcherUpdateLastErrorName());
+        String dpError;
+        if (!flashRawRangeFromHttp(
+                partAddr, dp.sourceOffset, copySize, dp.entry, false, hwid.c_str(), &dpError
+            )) {
+            displayError(String(typeStr) + ": " + dpError);
             goto DONE;
         }
     }
@@ -501,21 +590,9 @@ bool installFirmwareDynamic(
         launcherSaveInstalledAppMetadata(
             table, appEntry, file, installedName, fatLabels, registeredSpiffsLabel
         );
-
-        String appNum = generateAppNum(file);
-        BackupInstallInfo bkInfo;
-        bkInfo.appNum = appNum;
-        bkInfo.sdFilepath = file;
-        bkInfo.appName = installedName.isEmpty() ? String(appEntry.label) : installedName;
-        for (const auto &dp : dataPartitions) {
-            if (!dp.hasEntry) continue;
-            BackupPartitionInfo part;
-            part.label = dp.label;
-            part.type = dp.subtype == 0x81 ? "FAT" : dp.subtype == 0x83 ? "LittleFS" : "SPIFFS";
-            bkInfo.partitions.push_back(part);
-        }
-        saveInstalledToConfig(bkInfo);
-        if (autoBackup && !bkInfo.partitions.empty()) backupAllPartitionsForApp(appNum);
+        // OTA (http) installs are not registered in backupData.json and are not
+        // backed up: the source is a URL, not an SD file, so there is nothing to
+        // tie a backup to when reinstalling.
     }
 
     saveIntoNVS();
@@ -526,7 +603,8 @@ DONE:
     if (success) {
         displayRedStripe("Restarting");
         launcherDelayMs(500);
-        reboot();
+
+        return releaseHeapObjectsAndReboot();
     }
     return success;
 }
@@ -650,6 +728,14 @@ JsonDocument getVersionInfo(const String &fid) {
     return versions;
 }
 
+// ArduinoJson's ::String converter falls back to serializeJson() (yielding the
+// literal text "null") when the variant isn't a JSON string, so a plain .as<String>()
+// on an absent/optional manifest field (e.g. "data": null) does NOT come back empty.
+// Use this wherever a field may legitimately be null to get a real empty String instead.
+static String jsonOptString(JsonVariantConst v) {
+    return v.is<const char *>() ? String(v.as<const char *>()) : String();
+}
+
 // Resolves the HTTP URL a data partition's payload should be fetched from during an
 // OTA install. Returns empty when the payload is embedded in the app image (manifest
 // "source" is "firmware" or absent); otherwise the direct URL of the matching
@@ -657,16 +743,14 @@ JsonDocument getVersionInfo(const String &fid) {
 static String buildSourceUrl(const String &fid, const String &sourceUrl, bool useProxy);
 
 static String resolveDataPartitionSource(JsonObject part, JsonObject sources) {
-    String src = part["source"].as<String>();
+    String src = jsonOptString(part["source"]);
     if (src.isEmpty() || src == "firmware" || sources.isNull()) return String();
-    String url = sources[src].as<String>();
+    String url = jsonOptString(sources[src]);
     if (url.isEmpty()) return String();
     return buildSourceUrl(String(), url, false);
 }
 
 void installFirmwareFromManifest(const String &fid, const String &version, String installedName) {
-    displayRedStripe("Getting install info");
-
     JsonDocument detail(launcherJsonAllocator());
     String serverUrl =
         "https://api.launcherhub.net/firmwares?fid=" + fid + "&version=" + encodeQueryValue(version);
@@ -710,7 +794,8 @@ void installFirmwareFromManifest(const String &fid, const String &version, Strin
             dp.sourceUrl = resolveDataPartitionSource(part, sources);
             dp.label = part["label"].as<String>();
             if (dp.label.isEmpty()) dp.label = "spiffs";
-            if (dp.label == "assets" && declaredSize > LAUNCHER_DEFAULT_SPIFFS_SIZE) {
+            // accept data partitions as they are
+            if (dp.label != "label" && dp.copySize > 0 && declaredSize > LAUNCHER_DEFAULT_SPIFFS_SIZE) {
                 dp.partitionSize = declaredSize;
             } else if (declaredSize > LAUNCHER_DEFAULT_SPIFFS_THRESHOLD) {
                 dp.partitionSize = LAUNCHER_INSTALL_USE_REMAINING_SPIFFS_SIZE;
@@ -901,7 +986,22 @@ static bool mergedDownloadCb(const uint8_t *data, size_t len, void *ctx) {
     constexpr size_t sdWriteChunk = 512;
     while (totalWrote < len) {
         const size_t part = min(sdWriteChunk, len - totalWrote);
-        if (d->file->write(data + totalWrote, part) != part) return false;
+
+        size_t written = d->file->write(data + totalWrote, part);
+        if (written != part) {
+            d->file->flush();
+            vTaskDelay(pdMS_TO_TICKS(20));
+            written = d->file->write(data + totalWrote, part);
+        }
+        if (written != part) {
+            launcherConsolePrintf(
+                "Merge: SD write failed at pos 0x%06X (%u/%u bytes)\n",
+                (unsigned)(*d->pos + totalWrote),
+                (unsigned)written,
+                (unsigned)part
+            );
+            return false;
+        }
         totalWrote += part;
     }
     d->sourceWritten += totalWrote;
@@ -957,14 +1057,52 @@ static bool reportDownloadOutcome(
 
 // Pads the merged file with 0xFF from the current write position up to `target`.
 static bool padMergedFile(File &file, size_t &pos, size_t target) {
-    if (pos > target) return false; // components overlap: malformed manifest
-    uint8_t ff[256];
-    memset(ff, 0xFF, sizeof(ff));
-    while (pos < target) {
-        const size_t chunk = min(sizeof(ff), target - pos);
-        if (file.write(ff, chunk) != chunk) return false;
-        pos += chunk;
+    if (pos > target) {
+        launcherConsolePrintf(
+            "Merge: overlap while placing source at 0x%06X (pos 0x%06X)\n", (unsigned)target, (unsigned)pos
+        );
+        return false; // components overlap: malformed manifest
     }
+    constexpr size_t padProgressThreshold = 128 * 1024;
+    constexpr size_t padProgressStep = 64 * 1024; // redraw at most once per 32KB written
+    const size_t total = target - pos;
+    const bool report = total > padProgressThreshold;
+    if (report) {
+        progressHandler(0, total); // repaints the frame, so label it afterwards
+        displayRedStripe("Padding..");
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    uint8_t ff[4096];
+    memset(ff, 0xFF, sizeof(ff));
+    size_t done = 0, lastReported = 0;
+    while (pos < target) {
+        vTaskDelay(pdMS_TO_TICKS(2));
+        const size_t chunk = min(sizeof(ff), target - pos);
+        size_t written = file.write(ff, chunk);
+        if (written != chunk) {
+            file.flush();
+            vTaskDelay(pdMS_TO_TICKS(20));
+            written = file.write(ff, chunk);
+        }
+        if (written != chunk) {
+            launcherConsolePrintf(
+                "Merge: SD write failed while padding to 0x%06X (pos 0x%06X)\n",
+                (unsigned)target,
+                (unsigned)pos
+            );
+            return false;
+        }
+        pos += chunk;
+        done += chunk;
+        if (done - lastReported >= padProgressStep) {
+            lastReported = done;
+            file.flush();
+            if (report) progressHandler(done, total);
+            wakeUpScreen();
+        }
+    }
+    if (report) file.flush();
     return true;
 }
 
@@ -985,25 +1123,37 @@ static bool mergeSourceIntoFile(
     uint8_t *captureBuf = nullptr, size_t captureStart = 0, size_t captureLen = 0
 ) {
     if (sourceUrl.isEmpty()) return false;
-    if (!padMergedFile(file, pos, offset)) {
-        launcherConsolePrintf(
-            "Merge: overlap while placing source at 0x%06X (pos 0x%06X)\n", (unsigned)offset, (unsigned)pos
+    if (!padMergedFile(file, pos, offset)) return false;
+    String activeUrl = buildSourceUrl(fid, sourceUrl, useProxy);
+
+    for (uint8_t attempt = 0; attempt < 2; ++attempt) {
+        LauncherHttpResponse resp;
+        MergedDownloadContext ctx = {&file, &pos, 0, 0, 0, &resp, captureBuf, captureStart, captureLen};
+        bool ok = launcherHttpGetStream(
+            activeUrl.c_str(), mergedDownloadCb, &ctx, &resp, "HWID", launcherWifiMac().c_str()
         );
+        file.flush();
+
+        if (ok && resp.status == 200) {
+            if (resp.content_length > 0 && ctx.sourceWritten != (size_t)resp.content_length) return false;
+            return true;
+        }
+
+        // Nothing was written for this source yet (a redirect that failed to
+        // connect never reaches the data callback), so pos/file are untouched and
+        // it's safe to retry in place after falling back to /proxy. A genuine
+        // mid-stream drop (some bytes already written) is not retried here, to
+        // avoid writing this source's bytes twice.
+        const bool unfollowedRedirect = resp.status >= 300 && resp.status < 400;
+        if (attempt == 0 && ctx.sourceWritten == 0 && unfollowedRedirect &&
+            activeUrl.indexOf("/download?") >= 0) {
+            activeUrl.replace("/download?", "/proxy?");
+            launcherConsolePrintf("Redirect not followed, falling back to /proxy for source download\n");
+            continue;
+        }
         return false;
     }
-    String url = buildSourceUrl(fid, sourceUrl, useProxy);
-
-    LauncherHttpResponse resp;
-    MergedDownloadContext ctx = {&file, &pos, 0, 0, 0, &resp, captureBuf, captureStart, captureLen};
-    pauseInputHandlerTask();
-    bool ok =
-        launcherHttpGetStream(url.c_str(), mergedDownloadCb, &ctx, &resp, "HWID", launcherWifiMac().c_str());
-    file.flush();
-    resumeInputHandlerTask();
-
-    if (!ok || resp.status != 200) return false;
-    if (resp.content_length > 0 && ctx.sourceWritten != (size_t)resp.content_length) return false;
-    return true;
+    return false;
 }
 
 // Scans a raw partition table blob and returns the flash offset of the first data
@@ -1037,10 +1187,10 @@ static bool __attribute__((noinline)) downloadSplitFirmware(
     const String &version, bool autoAdvance
 ) {
     JsonObject sources = install["sources"].as<JsonObject>();
-    String blUrl = sources["bootloader"].as<String>();
-    String partUrl = sources["partitions"].as<String>();
-    String fwUrl = sources["firmware"].as<String>();
-    String dataUrl = sources["data"].as<String>();
+    String blUrl = jsonOptString(sources["bootloader"]);
+    String partUrl = jsonOptString(sources["partitions"]);
+    String fwUrl = jsonOptString(sources["firmware"]);
+    String dataUrl = jsonOptString(sources["data"]);
 
     // A merged/factory firmware ships bootloader+partitions+app inside a single image
     // and has no separate bootloader/partitions sources.
@@ -1074,7 +1224,7 @@ static bool __attribute__((noinline)) downloadSplitFirmware(
 
     size_t pos = 0;
     bool ok = true;
-
+    pauseInputHandlerTask();
     if (mergedFirmware) {
         // Factory image goes to 0x0. Snapshot the embedded partition table (0x8000) as
         // it streams by so we can locate the data partition afterwards.
@@ -1122,7 +1272,7 @@ static bool __attribute__((noinline)) downloadSplitFirmware(
     }
     file.flush();
     file.close();
-
+    resumeInputHandlerTask();
     return reportDownloadOutcome(
         ok, filePath, folder, fid, version, autoAdvance, "Merged firmware assembled.."
     );
@@ -1166,8 +1316,10 @@ void downloadFirmware(
         if (getInfo(infoUrl, detail)) {
             JsonObject install = detail["version"]["install"].as<JsonObject>();
             JsonObject sources = install["sources"].as<JsonObject>();
-            bool hasBootAndParts = !sources["bootloader"].isNull() && !sources["partitions"].isNull();
-            bool hasSeparateData = !sources["data"].isNull();
+
+            bool hasBootAndParts = !jsonOptString(sources["bootloader"]).isEmpty() &&
+                                   !jsonOptString(sources["partitions"]).isEmpty();
+            bool hasSeparateData = !jsonOptString(sources["data"]).isEmpty();
             if (!sources.isNull() && (hasBootAndParts || hasSeparateData)) {
                 downloadSplitFirmware(fid, install, filePath, folder, version, autoAdvance);
                 wakeUpScreen();
@@ -1202,6 +1354,13 @@ retry:
     if ((!ok || sdSize <= bufSize) && tries < 1) {
         tries++;
         SDM.remove(filePath);
+        // A redirect the device can't follow is api.launcherhub.net's answer, not a
+        // hiccup on the CDN side; use the single retry we already have to fall back
+        // to /proxy instead of just repeating the doomed request.
+        if (response.status >= 300 && response.status < 400 && fileAddr.indexOf("/download?") >= 0) {
+            fileAddr.replace("/download?", "/proxy?");
+            launcherConsolePrintf("Redirect not followed, falling back to /proxy for SD download\n");
+        }
         goto retry;
     }
     ok = ok && !(response.content_length > 0 && sdSize != (size_t)response.content_length);
@@ -1300,7 +1459,7 @@ void installFirmware(
     {
         auto spiffsIt = std::find_if(
             dataPartitions.begin(), dataPartitions.end(), [](const LauncherInstallDataPartition &d) {
-                return d.subtype != 0x81;
+                return d.subtype != 0x81 && d.label == "spiffs";
             }
         );
         if (spiffsIt != dataPartitions.end()) {

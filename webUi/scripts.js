@@ -1,5 +1,8 @@
 function _(e) { return document.getElementById(e); }
 function toggleMenu(){_('menu').classList.toggle('open')}
+function toggleConfigOverlay(){_('configOverlay').classList.toggle('open')}
+function closeConfigOverlay(event){if(event.target.id==='configOverlay')_('configOverlay').classList.remove('open')}
+function closePmanResizeOverlay(event){if(event.target.id==='pmanResizeOverlay')_('pmanResizeOverlay').classList.remove('open')}
 function toggleRow(b){const r=b.closest('tr').nextElementSibling;r.style.display=r.style.display==='none'?'table-row':'none'}
 const editableExts = new Set(['txt','ini','conf','c','cpp','h','hpp','js','css','htm','html','ts']);
 function isEditable(name) { return editableExts.has(name.split('.').pop().toLowerCase()); }
@@ -134,6 +137,7 @@ function startUpdate(fileName) {
     httpRequest("POST", "/UPDATE", { async: false, body: formdata4 });
 }
 function callOTA() {
+    _currentSection = 'ota';
     const formdata = new FormData();
     formdata.append("update", 1);
     httpRequest("POST", "/OTA", { async: false, body: formdata });
@@ -163,6 +167,16 @@ function readPartitionLabel(bytes, offset) {
 }
 function alignUp(value, alignment) {
     return Math.ceil(value / alignment) * alignment;
+}
+function isSourceDataEmpty(data, offset, len = 16) {
+    const end = Math.min(offset + len, data.length);
+    if (end <= offset) return true;
+    let allFF = true, allZero = true;
+    for (let i = offset; i < end; i++) {
+        if (data[i] !== 0xFF) allFF = false;
+        if (data[i] !== 0x00) allZero = false;
+    }
+    return allFF || allZero;
 }
 function measureEspImageSize(data, imageOffset) {
     if (imageOffset + 24 > data.length) return 0;
@@ -280,7 +294,11 @@ function analyzeFile() {
                 if (type === 0x01 && [0x81, 0x82, 0x83].includes(subtype) && offset < data.length) {
                     let size = declaredSize;
                     if (data.length < (offset + size)) size = data.length - offset;
-                    if (size > 0) {
+                    const isSpiffsLike = subtype === 0x82 || subtype === 0x83;
+                    // an empty (formatted, no payload) SPIFFS/LittleFS partition still needs to be
+                    // reported so the device can create it at minimum size, just with nothing to copy
+                    if (isSpiffsLike && isSourceDataEmpty(data, offset)) size = 0;
+                    if (size > 0 || (isSpiffsLike && declaredSize > 0)) {
                         partitions.push({
                             kind: 'data',
                             subtype,
@@ -355,6 +373,8 @@ function rebootButton() {
         httpRequest("GET", "/reboot");
     }
 }
+let _sdInfo = null;
+let _currentSection = '';
 function systemInfo() {
     httpRequest("GET", "/systeminfo", {
         onload: (xhr) => {
@@ -362,9 +382,8 @@ function systemInfo() {
                 try {
                     const data = JSON.parse(xhr.responseText);
                     _("firmwareVersion").innerHTML = data.VERSION;
-                    _("freeSD").innerHTML = data.SD.free;
-                    _("usedSD").innerHTML = data.SD.used;
-                    _("totalSD").innerHTML = data.SD.total;
+                    _sdInfo = data.SD;
+                    if (_currentSection === 'files') _("detailsheader").innerHTML = "<h3>Files</h3>" + sdUsageBar();
                 } catch (error) {
                     console.error("JSON Parsing Error: ", error);
                 }
@@ -374,7 +393,20 @@ function systemInfo() {
         }
     });
 }
+// Same visual language as the partition usage bar (pman-bar/pman-seg/pman-legend), reused
+// here so the SD Card stats read as one system: Used maps to pman-data, Free to pman-free.
+function sdUsageBar() {
+    if (!_sdInfo || !_sdInfo.totalBytes) return '';
+    const usedPct = (_sdInfo.usedBytes / _sdInfo.totalBytes) * 100;
+    const freePct = 100 - usedPct;
+    return `<div class="pman-bar"><div class="pman-seg pman-data" style="width:${usedPct}%" title="Used (${_sdInfo.used})"></div><div class="pman-seg pman-free" style="width:${freePct}%" title="Free (${_sdInfo.free})"></div></div>` +
+        `<div class="row pman-legend">` +
+        `<span><i class="pman-dot pman-data"></i>Used <b style="color:var(--fg)">${_sdInfo.used}</b></span>` +
+        `<span><i class="pman-dot pman-free"></i>Free <b style="color:var(--fg)">${_sdInfo.free}</b></span>` +
+        `<span>Total <b style="color:var(--fg)">${_sdInfo.total}</b></span></div>`;
+}
 function listFilesButton(folders) {
+    _currentSection = 'files';
     _("drop-area").style.display = 'block';
     _("actualFolder").value = folders;
     let previousFolder = folders.substring(0, folders.lastIndexOf('/'));
@@ -437,7 +469,7 @@ function listFilesButton(folders) {
             console.error("Network error while fetching file list.");
         }
     });
-    _("detailsheader").innerHTML = "<h3>Files</h3>";
+    _("detailsheader").innerHTML = "<h3>Files</h3>" + sdUsageBar();
     _("updetailsheader").innerHTML =
         "<input type='file' id='fa' multiple style='display:none'>" +
         "<input type='file' id='fol' webkitdirectory directory multiple style='display:none'>" +
@@ -618,5 +650,217 @@ function uploadFile(folder, file) {
         ajax.addEventListener("abort", () => reject(), false);
         ajax.open("POST", "/");
         ajax.send(formdata);
+    });
+}
+
+// ── Partition Manager (PMan) ────────────────────────────────────────────────────
+let _pmanData = null;
+function pmanSize(bytes) {
+    if (bytes >= 1048576) return (bytes % 1048576 ? (bytes / 1048576).toFixed(2) : bytes / 1048576) + ' MB';
+    if (bytes >= 1024) return (bytes % 1024 ? (bytes / 1024).toFixed(2) : bytes / 1024) + ' KB';
+    return bytes + ' B';
+}
+function pmanHex(n) { return '0x' + n.toString(16).toUpperCase(); }
+function partitionsPost(params, onDone) {
+    const fd = new FormData();
+    Object.keys(params).forEach((k) => fd.append(k, params[k]));
+    httpRequest("POST", "/partitions", {
+        body: fd,
+        onload: (xhr) => {
+            if (xhr.status === 200) {
+                if (typeof onDone === 'function') onDone(xhr);
+            } else {
+                _("status").innerHTML = xhr.responseText || 'Failed';
+            }
+        }
+    });
+}
+function loadPartitions() {
+    _currentSection = 'partitions';
+    _("detailsheader").innerHTML = "<h3>Partition Manager</h3>";
+    _("status").innerHTML = "";
+    _("OTAdetails").style.display = 'none';
+    _("analysisOutput").style.display = 'none';
+    _("spiffsInfo").style.display = 'none';
+    _("updetailsheader").innerHTML = "";
+    _("updetails").innerHTML = "";
+    _("drop-area").style.display = 'block';
+    _("details").innerHTML = "Loading...";
+    httpRequest("GET", "/partitions", {
+        onload: (xhr) => {
+            if (xhr.status !== 200) { _("details").innerHTML = "Failed to load partitions."; return; }
+            _pmanData = JSON.parse(xhr.responseText);
+            pmanRender(_pmanData);
+        }
+    });
+}
+function pmanUsageBar(data) {
+    const items = [...data.entries].sort((a, b) => a.offset - b.offset);
+    let segs = '';
+    const addSeg = (size, cls, title) => {
+        if (size <= 0) return;
+        segs += `<div class="pman-seg ${cls}" style="width:${(size / data.flashSize) * 100}%" title="${title}"></div>`;
+    };
+    if (items.length && items[0].offset > 0) addSeg(items[0].offset, 'pman-sys', 'System (bootloader, nvs, otadata...)');
+    items.forEach((e, i) => {
+        addSeg(e.size, e.type === 0 ? 'pman-app' : 'pman-data', `${e.label} (${pmanSize(e.size)})`);
+        const next = items[i + 1];
+        const gapEnd = next ? next.offset : data.flashSize;
+        const gapStart = e.offset + e.size;
+        addSeg(gapEnd - gapStart, 'pman-free', `Free (${pmanSize(gapEnd - gapStart)})`);
+    });
+    return `<div class="pman-bar">${segs}</div>` +
+        `<div class="row pman-legend">` +
+        `<span><i class="pman-dot pman-app"></i>App</span>` +
+        `<span><i class="pman-dot pman-data"></i>Data</span>` +
+        `<span><i class="pman-dot pman-free"></i>Free</span>` +
+        `<span><i class="pman-dot pman-sys"></i>System</span></div>`;
+}
+function pmanRowActions(e) {
+    let a = `<span style="cursor:pointer" onclick="pmanDetails(${e.offset})" title="Details">&#8505;</span>`;
+    if (e.protected) return a;
+    a += `&nbsp;<span style="cursor:pointer" onclick="pmanResize(${e.offset})" title="Resize">&#8596;</span>`;
+    if (e.type === 1) {
+        a += `&nbsp;<span style="cursor:pointer" onclick="pmanBackup('${e.label}')" title="Backup">&#128190;</span>` +
+             `&nbsp;<span style="cursor:pointer" onclick="pmanRestore('${e.label}')" title="Restore">&#8635;</span>` +
+             `&nbsp;<span style="cursor:pointer" onclick="pmanFormat(${e.offset},'${e.label}')" title="Format">&#9099;</span>`;
+    }
+    a += `&nbsp;<span style="cursor:pointer" onclick="pmanDelete(${e.offset},'${e.label}')" title="Remove">&#128465;</span>`;
+    return a;
+}
+function pmanRender(data) {
+    let toolbar = '<div class="row" style="margin:8px 0">' +
+        '<button onclick="pmanCreate(0,16,\'app\',1024)">+ OTA App</button>' +
+        '<button onclick="pmanCreate(1,129,\'vfs\',512)">+ FAT</button>' +
+        '<button onclick="pmanCreate(1,130,\'spiffs\',256)">+ SPIFFS</button>';
+    if (data.dirty) {
+        toolbar += '<button onclick="pmanApply()" style="color:var(--ac);border-color:var(--ac)">&#10003; Apply Changes</button>' +
+            '<button onclick="pmanDiscard()">&#8634; Discard Changes</button>';
+    }
+    toolbar += '</div>';
+    if (data.dirty) toolbar += '<p style="color:var(--yw)">Unsaved changes — nothing is written to flash until you Apply.</p>';
+
+    let table = '<table><tr><th>Partition</th><th class="sz">Size</th><th class="ac"></th><th class="mb"></th></tr>\n';
+    data.entries.forEach((e) => {
+        const badges = (e.protected ? ' <span class="tag" style="opacity:.65">protected</span>' : '') +
+            (e.running ? ' <span class="tag" style="color:var(--ac)">running</span>' : '');
+        const appInfo = e.appName ? `<br><span style="color:var(--dim);font-size:.75rem">Firmware: ${e.appName}</span>` : '';
+        const dataInfo = (e.dataLabels && e.dataLabels.length) ?
+            `<br><span style="color:var(--dim);font-size:.75rem">Data partition: ${e.dataLabels.join(', ')}</span>` :
+            (e.type === 0 ? `<br><span style="color:var(--dim);font-size:.75rem">No data partition</span>` : '');
+        const label = `<b>${e.label}</b> <span style="color:var(--dim);font-size:.75rem">${e.typeName}/${e.subtypeName}</span>${badges}${appInfo}${dataInfo}`;
+        const actions = pmanRowActions(e);
+        table += `<tr><td>${label}</td><td class="sz">${pmanSize(e.size)}</td><td class="ac">${actions}</td>` +
+            `<td class="mb"><button onclick="toggleRow(this)">&#8942;</button></td></tr>\n` +
+            `<tr class="mrow" style="display:none"><td colspan="4"><span style="color:var(--dim);font-size:.75rem">${pmanSize(e.size)}</span>&nbsp;&nbsp;${actions}</td></tr>\n`;
+    });
+    table += '</table>';
+
+    let freeHtml = '';
+    if (data.freeRanges && data.freeRanges.length) {
+        freeHtml = '<h3 style="margin-top:14px">Free Space</h3><table>' +
+            '<tr><th>Offset</th><th class="sz">Size</th></tr>' +
+            data.freeRanges.map((r) => `<tr><td>${pmanHex(r.offset)}</td><td class="sz">${pmanSize(r.size)}</td></tr>`).join('') +
+            '</table>';
+    }
+
+    _("details").innerHTML = pmanUsageBar(data) + toolbar + table + freeHtml;
+}
+function pmanDetails(offset) {
+    const e = _pmanData.entries.find((x) => x.offset === offset);
+    if (!e) return;
+    window.alert(
+        'Label: ' + e.label +
+        '\nType: ' + e.typeName + '/' + e.subtypeName +
+        '\nOffset: ' + pmanHex(e.offset) +
+        '\nSize: ' + pmanHex(e.size) + ' (' + pmanSize(e.size) + ')' +
+        '\nFlags: ' + pmanHex(e.flags) +
+        (e.appName ? '\nFirmware: ' + e.appName : '') +
+        (e.dataLabels && e.dataLabels.length ? '\nData partition: ' + e.dataLabels.join(', ') : '')
+    );
+}
+let _pmanResizeEntry = null;
+function pmanResize(offset) {
+    const e = _pmanData.entries.find((x) => x.offset === offset);
+    if (!e) return;
+    _pmanResizeEntry = e;
+    const alignment = e.alignment || 4096;
+    const minSize = alignment;
+    const maxSize = e.maxOffset - e.offset;
+    const value = Math.min(Math.max(e.size, minSize), maxSize);
+
+    _('pmanResizeTitle').textContent = 'Resize ' + e.label;
+    _('pmanResizeBody').innerHTML =
+        `<p class="pman-resize-range">Range: ${pmanHex(minSize)} - ${pmanHex(maxSize)} (step ${pmanHex(alignment)})</p>` +
+        `<input type="range" id="pmanResizeSlider" min="${minSize}" max="${maxSize}" step="${alignment}" value="${value}" oninput="pmanResizeUpdate()">` +
+        `<div class="pman-resize-vals"><b id="pmanResizeHex"></b><span id="pmanResizeHuman" style="color:var(--dim)"></span></div>`;
+    pmanResizeUpdate();
+    _('pmanResizeOverlay').classList.add('open');
+}
+function pmanResizeUpdate() {
+    const v = parseInt(_('pmanResizeSlider').value);
+    _('pmanResizeHex').textContent = pmanHex(v);
+    _('pmanResizeHuman').textContent = pmanSize(v);
+}
+function pmanResizeConfirm() {
+    if (!_pmanResizeEntry) return;
+    const size = parseInt(_('pmanResizeSlider').value);
+    _('pmanResizeOverlay').classList.remove('open');
+    partitionsPost({ action: 'resize', offset: _pmanResizeEntry.offset, size }, () => loadPartitions());
+}
+function pmanCreate(type, subtype, defaultLabel, defaultSizeKb) {
+    const label = prompt('Partition label:', defaultLabel);
+    if (isNullOrEmpty(label)) return;
+    const sizeKb = prompt('Size in KB:', defaultSizeKb);
+    if (isNullOrEmpty(sizeKb)) return;
+    const size = parseInt(sizeKb) * 1024;
+    if (!size || size <= 0) { window.alert('Invalid size'); return; }
+    partitionsPost({ action: 'create', type, subtype, label, size }, () => loadPartitions());
+}
+function pmanDelete(offset, label) {
+    if (!confirm(`Remove partition "${label}"?\n\nThis is staged until you Apply Changes.`)) return;
+    partitionsPost({ action: 'delete', offset }, () => loadPartitions());
+}
+function pmanFormat(offset, label) {
+    if (!confirm(`Erase all data on "${label}" now?\n\nThis happens immediately and can't be undone.`)) return;
+    partitionsPost({ action: 'format', offset }, () => loadPartitions());
+}
+function pmanApply() {
+    if (!confirm('Write the new partition table and reboot the device now?')) return;
+    partitionsPost({ action: 'apply' }, () => {
+        _("details").innerHTML = '<p>Partition table written. The device is rebooting...</p>';
+        _("status").innerHTML = '';
+    });
+}
+function pmanDiscard() {
+    if (!confirm('Discard all pending changes?')) return;
+    partitionsPost({ action: 'discard' }, () => loadPartitions());
+}
+function pmanBackup(label) {
+    partitionsPost({ action: 'backup', label }, (xhr) => {
+        const res = JSON.parse(xhr.responseText);
+        _("status").innerHTML = 'Backup saved: ' + res.path;
+    });
+}
+function pmanRestore(label) {
+    httpRequest("GET", "/partitions?list=backups&label=" + encodeURIComponent(label), {
+        onload: (xhr) => {
+            if (xhr.status !== 200) { _("status").innerHTML = 'Failed to list backups'; return; }
+            const list = (JSON.parse(xhr.responseText).backups) || [];
+            if (!list.length) { window.alert(`No backups found for "${label}"`); return; }
+            let path = list[list.length - 1].path;
+            if (list.length > 1) {
+                const options = list.map((b, i) => `${i + 1}: ${b.path}`).join('\n');
+                const choice = prompt('Choose a backup to restore:\n' + options, String(list.length));
+                if (isNullOrEmpty(choice)) return;
+                const picked = list[parseInt(choice) - 1];
+                if (!picked) { window.alert('Invalid choice'); return; }
+                path = picked.path;
+            }
+            if (!confirm(`Restore "${label}" from:\n${path}\n\nThis overwrites the current data on the partition.`)) return;
+            partitionsPost({ action: 'restore', label, path }, () => {
+                _("status").innerHTML = `Restored ${label} from ${path}`;
+            });
+        }
     });
 }

@@ -192,13 +192,18 @@ void launcherPartitionInitDefaultSizes() {
     if (flashSize <= 0x400000) {
         LAUNCHER_DEFAULT_SPIFFS_SIZE = 0x20000;
         LAUNCHER_DEFAULT_FAT_SIZE = 0x50000;
-    } else if (flashSize <= 0x800000) {
+    } else {
         LAUNCHER_DEFAULT_SPIFFS_SIZE = 0x70000;
         LAUNCHER_DEFAULT_FAT_SIZE = 0x70000;
-    } else {
-        LAUNCHER_DEFAULT_SPIFFS_SIZE = 0x100000;
-        LAUNCHER_DEFAULT_FAT_SIZE = 0x100000;
     }
+
+    // if (flashSize <= 0x800000) {
+    //     LAUNCHER_DEFAULT_SPIFFS_SIZE = 0x70000;
+    //     LAUNCHER_DEFAULT_FAT_SIZE = 0x70000;
+    // } else {
+    //     LAUNCHER_DEFAULT_SPIFFS_SIZE = 0x100000;
+    //     LAUNCHER_DEFAULT_FAT_SIZE = 0x100000;
+    // }
 }
 
 bool LauncherPartitionEntry::isApp() const { return type == kTypeApp; }
@@ -391,7 +396,13 @@ bool launcherPartitionMigrateMovedData(
     for (const LauncherPartitionEntry &target : targetTable.entries) {
         const LauncherPartitionEntry *source = findSourcePartition(currentTable, target);
         if (!source) continue;
-        if (source->offset == target.offset) continue;
+        if (source->offset == target.offset) {
+            if (!launcherPatchReducedLittlefsSuperblocks(target, error)) {
+                if (error && error->length() == 0) *error = "Could not patch reduced LittleFS partition";
+                return false;
+            }
+            continue;
+        }
 
         const uint32_t copySize = std::min(source->size, target.size);
         if (copySize == 0) continue;

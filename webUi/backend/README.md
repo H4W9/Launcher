@@ -52,6 +52,9 @@ Login padrao: `admin` / `admin`
 | `/` | POST | Upload de arquivos (multipart) |
 | `/rename` | POST | Renomeia arquivo ou pasta |
 | `/nvs` | GET / POST | Dados NVS persistidos em `nvs_mock.json` |
+| `/partitions` | GET | Tabela de particoes atual (com edicoes pendentes, se houver) |
+| `/partitions?list=backups&label=` | GET | Lista de backups conhecidos para uma particao |
+| `/partitions` | POST | `action=resize\|create\|delete\|format\|apply\|discard\|backup\|restore` |
 | `/wifi` | GET | Simulado |
 | `/sdpins` | GET | Simulado |
 | `/reboot` | GET | Simulado |
@@ -82,6 +85,16 @@ Sem `manifest`, ele mantem apenas um fallback legado simulado.
 Os dados NVS ficam em `nvs_mock.json` na mesma pasta do servidor e persistem entre reinicializacoes. Na primeira execucao, um conjunto de chaves de exemplo e criado automaticamente.
 
 A chave `launcher/token` nunca e exposta nem editavel, assim como no firmware.
+
+## Partition Manager (PMan) simulado
+
+Espelha o modelo de `src/partition_table_model.cpp` / `src/partitioner.cpp` o suficiente para exercitar a UI:
+
+- O estado "gravado em flash" fica em `partitions_mock.json` (criado com uma tabela de exemplo: `factory`, dois apps OTA `app1`/`app2` com metadados de app registry simulados — `Bruce` e `Marauder` — cada um com sua particao de dados associada).
+- Edicoes (`resize`, `create`, `delete`) ficam em memoria ("pending changes") ate um `action=apply`, que persiste em `partitions_mock.json` e limpa o estado pendente — igual ao fluxo `dirty` do dispositivo. `action=discard` descarta as edicoes.
+- `action=format` so e permitido sem edicoes pendentes, como no firmware.
+- `action=backup` e `action=restore` sao simulados: nenhum dado real e copiado, apenas caminhos de arquivo ficticios sao gerados/lembrados em memoria por `label`, o suficiente para exercitar o fluxo de backup/restore na UI.
+- Particoes protegidas (a "rodando", `factory`/`test`, e particoes de sistema como `nvs`/`otadata`) seguem as mesmas regras de bloqueio do firmware.
 
 ## Seguranca
 

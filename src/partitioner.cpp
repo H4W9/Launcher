@@ -10,6 +10,7 @@
 #include "partition_table_model.h"
 #include "ram_profile.h"
 #include "sd_functions.h"
+#include "utils.h"
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 #include <globals.h>
@@ -466,7 +467,7 @@ bool formatPartition(const LauncherPartitionEntry &entry, bool dirty) {
 
     displayRedStripe("Formatting...");
     bool ok = launcherRawPrepareDataPartition(entry.offset, entry.size);
-    displayError(ok ? "Formatted" : launcherUpdateLastErrorName());
+    displayMsg(ok ? "Formatted" : launcherUpdateLastErrorName());
     return ok;
 }
 
@@ -586,6 +587,44 @@ bool findFreeSliderRange(
     return false;
 }
 
+bool wipeFlashMemory() {
+    if (!confirmAction("Wipe flash memory?")) return false;
+
+    String error;
+    LauncherPartitionTable current;
+    if (!launcherPartitionReadCurrent(current, &error)) {
+        launcherConsolePrintf("Partition table read failed: %s\n", error.c_str());
+        displayError(error.length() ? error : "Read failed");
+        return false;
+    }
+
+    LauncherPartitionTable target;
+    target.flashSize = current.flashSize;
+    for (const LauncherPartitionEntry &entry : current.entries) {
+        if (isProtectedPartition(entry)) target.entries.push_back(entry);
+    }
+
+    if (!validateOrShow(target)) return false;
+
+    displayRedStripe("Clearing App registry");
+    if (!launcherClearAppRegistry()) {
+        displayError("Registry clear failed");
+        return false;
+    }
+
+    displayRedStripe("Writing table");
+    if (!launcherPartitionWriteGeneratedTable(target, &error)) {
+        launcherConsolePrintf("Partition table write failed: %s\n", error.c_str());
+        displayError(error.length() ? error : "Write failed");
+        return false;
+    }
+
+    displayRedStripe("Restart needed");
+    waitForSelectRelease();
+
+    return releaseHeapObjectsAndReboot();
+}
+
 bool applyPartitionChanges(const LauncherPartitionTable &table) {
     LauncherPartitionTable target = table;
     if (!compactOrShow(target)) return false;
@@ -616,9 +655,8 @@ bool applyPartitionChanges(const LauncherPartitionTable &table) {
 
     displayRedStripe("Restart needed");
     waitForSelectRelease();
-    FREE_TFT
-    reboot();
-    return true;
+
+    return releaseHeapObjectsAndReboot();
 }
 } // namespace
 
@@ -688,7 +726,7 @@ void partList() {
                              if (path.isEmpty()) {
                                  displayError("Backup failed");
                              } else {
-                                 displayError("Backup saved!");
+                                 displayMsg("Backup saved!");
                              }
                          } else {
                              String outputPath = String("/bkp/") + entry.label;
@@ -779,6 +817,15 @@ void partList() {
                  }}
             );
         }
+        if (dev_mode) {
+            partitionOptions.push_back(
+                {"Wipe Flash memory",
+                 [&]() {
+                     if (wipeFlashMemory()) returnToMenu = true;
+                 },
+                 ALCOLOR}
+            );
+        }
         partitionOptions.push_back(
             {"Back",
              [&]() {
@@ -845,9 +892,8 @@ void dumpPartition(const char *partitionLabel, const char *outputPath) {
         progressHandler(int(offset + bufferSize), partition->size);
     }
     outputFile.close();
-    displayRedStripe("    Complete!    ");
-    launcherDelayMs(500);
-    displayError(output);
+    displayMsg("    Complete!    ");
+    displayMsg(output);
     launcherConsolePrintf("Dump da partição %s para o arquivo %s concluído\n", partitionLabel, outputPath);
 
     bool attach = false;
@@ -880,7 +926,7 @@ void restorePartition(const char *partitionLabel) {
         return;
     }
     launcherDelayMs(100);
-    displayError("    Restored!    ");
+    displayMsg("    Restored!    ");
 }
 
 #define TAG "Partitioneer"
@@ -941,8 +987,8 @@ void partitionCrawler() {
 
     if (removedRunningOta) {
         ESP_LOGI(TAG, "Running OTA partition was removed from partition table, restarting");
-        reboot();
-        return;
+
+        return (void)releaseHeapObjectsAndReboot();
     }
 
     if (running_partition->address == test_partition->address) {
@@ -951,7 +997,8 @@ void partitionCrawler() {
             "Running partition address matches target partition address 0x%08lX, skipping invalidation",
             static_cast<unsigned long>(running_partition->address)
         );
-        reboot();
+
+        return (void)releaseHeapObjectsAndReboot();
         return;
     }
 
@@ -963,7 +1010,8 @@ void partitionCrawler() {
         ESP_LOGE(TAG, "Failed to write 0x00 to the first byte of the running partition");
     } else {
         ESP_LOGI(TAG, "Restarting system to boot from test partition");
-        reboot();
+
+        return (void)releaseHeapObjectsAndReboot();
     }
 }
 

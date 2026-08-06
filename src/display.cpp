@@ -1,5 +1,6 @@
 #include "display.h"
 #include "app_registry.h"
+#include "cardkb2.h"
 #include "idf/idf_wifi.h"
 #include "idf/launcher_platform.h"
 #include "mykeyboard.h"
@@ -8,6 +9,7 @@
 #include "ram_profile.h"
 #include "sd_functions.h"
 #include "settings.h"
+#include "utils.h"
 #include <cstring>
 #include <globals.h>
 #include <vector>
@@ -193,8 +195,15 @@ void initDisplay(bool doAll) {
     if (_name == 1) name = "u/bmorcelli";
     else if (_name == 2) name = "gh/bmorcelli";
     tft->drawRoundRect(3, 3, tftWidth - 6, tftHeight - 6, 5, FGCOLOR);
+
+    int matrixTopMargin = 10;
+#if defined(HAS_TOUCH) || defined(HAS_KEYBOARD) || defined(USE_CARDKB2)
+    std::vector<MenuOptions> &bootAppShortcuts = launcherBootAppShortcuts();
+    if (!bootAppShortcuts.empty()) matrixTopMargin = drawBootAppShortcuts(bootAppShortcuts) + 2;
+#endif
+
     tft->setTextSize(FP);
-    tft->setCursor(10, 10);
+    tft->setCursor(10, matrixTopMargin);
     cor = 0;
     show = launcherRandom(0, 40);
     _x = tft->getCursorX();
@@ -257,6 +266,7 @@ void initDisplay(bool doAll) {
 
     String selectedAppName = launcherSelectedBootAppName();
     if (!selectedAppName.isEmpty()) {
+        selectedAppName = selectedAppName.substring(0, tftWidth / (FM * LW) - 4);
         tft->setTextSize(FM);
         tft->setTextColor(FGCOLOR, BGCOLOR);
         int appTextY = tftHeight - (1.5 * (FM * LH) + 10);
@@ -351,7 +361,7 @@ void displayCurrentVersion(
 ** Function name: displayRedStripe
 ** Description:   Display Red Stripe with information
 ***************************************************************************************/
-void displayRedStripe(const String &text, uint16_t fgcolor, uint16_t bgcolor) {
+void displayRedStripe(const String &text, uint16_t fgcolor, uint16_t bgcolor, bool keepAwake) {
     // save tft settings before showing the stripe
     int _size = tft->getTextsize();
     int _x = tft->getCursorX();
@@ -359,6 +369,10 @@ void displayRedStripe(const String &text, uint16_t fgcolor, uint16_t bgcolor) {
     uint16_t _color = tft->getTextcolor();
     uint16_t _bgcolor = tft->getTextbgcolor();
     Serial.println(String("Display Red Stripe: ") + text);
+    // A stripe is put up to be read, so it restarts the idle clock. Long stages —
+    // an HTTP connect, an erase, a retry backoff — otherwise pass without a single
+    // wake, and the user ends up watching an unlit screen for the whole of one.
+    if (keepAwake) wakeUpScreen();
 
 #if E_PAPER_DISPLAY
     bgcolor = BLACK;
@@ -458,6 +472,8 @@ void displayError(String txt, bool waitKeyPress) {
     if (!waitKeyPress) vTaskDelay(pdMS_TO_TICKS(2000));
     while (waitKeyPress && !check(AnyKeyPress)) vTaskDelay(pdMS_TO_TICKS(10));
 }
+
+void displayMsg(String txt, bool waitKeyPress) { displayError(txt, waitKeyPress); }
 
 /***************************************************************************************
 ** Function name: progressHandler
@@ -923,6 +939,83 @@ void drawMainMenu(std::vector<MenuOptions> &opt, int index) {
     drawWifiStatus(bat > 0);
     tft->display(false);
 }
+/***************************************************************************************
+** Function name: launcherBootAppShortcuts
+** Description:   Lazily builds and caches the boot shortcut cards (one per installed
+**                 app). Shared by initDisplay (drawing) and the bootscreen input loop
+**                 (touch hit-testing), so both sides agree on labels/coordinates.
+***************************************************************************************/
+std::vector<MenuOptions> &launcherBootAppShortcuts() {
+    static std::vector<MenuOptions> shortcuts;
+    static bool built = false;
+    if (!built) {
+        for (const LauncherAppMetadata &app : launcherListInstalledApps()) {
+            String label = app.label;
+            String icon = (app.name.isEmpty() ? app.label : app.name).substring(0, 5);
+            icon.toUpperCase();
+            shortcuts.push_back({icon, "", [label]() { launcherBootAppByLabel(label.c_str()); }});
+        }
+        built = true;
+    }
+    return shortcuts;
+}
+
+/***************************************************************************************
+** Function name: drawBootAppShortcuts
+** Description:   Draws a row of cards with each installed app's initials at the top of
+**                 the bootscreen, with its keyboard digit shortcut in the top-left
+**                 corner, so a tap/keypress boots that app directly. Returns the total
+**                 height, in pixels, occupied by the cards.
+***************************************************************************************/
+int drawBootAppShortcuts(std::vector<MenuOptions> &opt) {
+    uint8_t size = opt.size();
+
+    if (size < 1) return 0;
+
+#if defined(USE_CARDKB2)
+    if (!CardKB2Installed) return 0;
+#endif
+
+    int boxH = LH * FM + 8;
+    int minBoxW = boxH * 2; // keep the card proportional to its (now taller) height
+    int maxCols = (tftWidth - 8) / minBoxW;
+    if (maxCols < 1) maxCols = 1;
+    if (maxCols > size) maxCols = size;
+    int boxW = (tftWidth - 8) / maxCols;
+    int y = 4;
+
+    // Only as many characters as actually fit the card, so names never overlap
+    // when several apps are installed and the cards get narrow.
+    int maxNameChars = (boxW - 6) / (LW * FM);
+    if (maxNameChars < 1) maxNameChars = 1;
+
+    for (int i = 0; i < size; ++i) {
+        int col = i % maxCols;
+        int row = i / maxCols;
+        int x = 4 + col * boxW;
+        int by = y + row * (boxH + 2);
+        opt[i].setCoords(x, by, boxW - 2, boxH);
+
+        // tft->fillRoundRect(x, by, boxW - 2, boxH, 3, BGCOLOR);
+        tft->drawRoundRect(x, by, boxW - 2, boxH, 3, FGCOLOR);
+
+        String name = opt[i].name;
+        if (static_cast<int>(name.length()) > maxNameChars) name = name.substring(0, maxNameChars);
+        tft->setTextSize(FM);
+        tft->setTextColor(FGCOLOR, BGCOLOR);
+        tft->drawCentreString(name, x + (boxW - 2) / 2, by + boxH / 2 - (LH * FM) / 2, 1);
+
+        if (i < 10) { // Only the first 10 apps have a keyboard digit shortcut (1..9,0)
+            String shortcutLabel = (i == 9) ? "0" : String(i + 1);
+            tft->setTextSize(FP);
+            tft->setTextColor(ALCOLOR, BGCOLOR);
+            tft->drawString(shortcutLabel, x + 2, by + 1);
+        }
+    }
+
+    int rows = (size + maxCols - 1) / maxCols;
+    return y + rows * (boxH + 2);
+}
 void drawDeviceBorder() {
     tft->drawRoundRect(5, 5, tftWidth - 10, tftHeight - 10, 5, FGCOLOR);
     tft->drawLine(5, (6 + 6 + FP * LH + 5), tftWidth - 6, (6 + 6 + FP * LH + 5), FGCOLOR);
@@ -1259,7 +1352,7 @@ void loopVersions(const String &_fid) {
         }
     }
 Sucesso:
-    if (!returnToMenu) reboot();
+    if (!returnToMenu) { return (void)releaseHeapObjectsAndReboot(); }
 
 // quando sair, redesenhar a tela
 SAIR:

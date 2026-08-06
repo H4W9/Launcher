@@ -10,6 +10,7 @@
 #include "partitioner.h"
 #include "powerSave.h"
 #include "sd_functions.h"
+#include "utils.h"
 #include "wifi_crypto.h"
 #include <FS.h>
 #include <SD.h>
@@ -63,6 +64,16 @@ JsonArray ensureWifiListInternal() {
     if (wifiList.isNull()) { wifiList = setting.createNestedArray("wifi"); }
     if (wifiList.isNull()) { log_e("ensureWifiList: failed to create wifi list"); }
     return wifiList;
+}
+
+JsonObject ensureKeyBindingObjectInternal() {
+    JsonObject setting = ensureSettingsRoot();
+    if (setting.isNull()) return JsonObject();
+
+    JsonObject bindings = setting["key_binding"].as<JsonObject>();
+    if (bindings.isNull()) { bindings = setting.createNestedObject("key_binding"); }
+    if (bindings.isNull()) { log_e("ensureKeyBindingObject: failed to create key_binding object"); }
+    return bindings;
 }
 
 bool ensureStringKey(nvs::NVSHandle &handle, const char *key, const char *value) {
@@ -122,6 +133,7 @@ void factoryReset() {
     eraseNamespace("l_wifi");
     eraseNamespace("launcher");
     backupConfigFileIfPresent();
+    favorite = JsonArray();
     settings.clear();
     defaultValues();
     saveConfigs();
@@ -131,6 +143,7 @@ void factoryReset() {
 JsonObject ensureSettingsRoot() {
     JsonArray settingsArray = settings.as<JsonArray>();
     if (settingsArray.isNull()) {
+        favorite = JsonArray();
         settings.clear();
         settingsArray = settings.to<JsonArray>();
     }
@@ -143,6 +156,7 @@ JsonObject ensureSettingsRoot() {
     if (settingsArray.size() > 0 && settingsArray[0].is<JsonObject>()) {
         setting = settingsArray[0].as<JsonObject>();
     } else {
+        favorite = JsonArray();
         settingsArray.clear();
         setting = settingsArray.add<JsonObject>();
     }
@@ -199,7 +213,7 @@ bool ensureM5StackUiFlowNVSDefaults() {
             launcherConsolePrintf("ensureM5StackUiFlowNVSDefaults: commit failed: %d", err);
             return false;
         }
-        launcherConsolePrint("ensureM5StackUiFlowNVSDefaults: default UiFlow keys created");
+        launcherConsolePrintln("ensureM5StackUiFlowNVSDefaults: default UiFlow keys created");
     }
 
     return true;
@@ -231,6 +245,83 @@ bool setWifiCredential(const String &ssidValue, const String &passwordValue, boo
     if (persist) { saveConfigs(); }
     return true;
 }
+
+bool removeWifiCredential(const String &ssidValue) {
+    JsonArray wifiList = ensureWifiListInternal();
+    if (wifiList.isNull()) return false;
+
+    for (size_t i = 0; i < wifiList.size(); i++) {
+        if (wifiList[i]["ssid"].as<String>() == ssidValue) {
+            wifiList.remove(i);
+            saveConfigs();
+            return true;
+        }
+    }
+    return false;
+}
+
+bool clearWifiCredentials() {
+    JsonArray wifiList = ensureWifiListInternal();
+    if (wifiList.isNull()) return false;
+
+    while (wifiList.size() > 0) wifiList.remove(0);
+    saveConfigs();
+    return true;
+}
+
+bool getKeyBinding(const String &key, String &outPath) {
+    JsonObject bindings = ensureKeyBindingObjectInternal();
+    if (bindings.isNull()) return false;
+    if (!bindings[key].is<String>()) return false;
+    outPath = bindings[key].as<String>();
+    return true;
+}
+
+bool setKeyBinding(const String &key, const String &path, bool persist) {
+    JsonObject bindings = ensureKeyBindingObjectInternal();
+    if (bindings.isNull()) return false;
+
+    bindings[key] = path;
+    if (persist) saveConfigs();
+    return true;
+}
+
+bool removeKeyBinding(const String &key, bool persist) {
+    JsonObject bindings = ensureKeyBindingObjectInternal();
+    if (bindings.isNull()) return false;
+    if (!bindings[key].is<String>()) return false;
+
+    bindings.remove(key);
+    if (persist) saveConfigs();
+    return true;
+}
+
+bool clearKeyBindings() {
+    JsonObject setting = ensureSettingsRoot();
+    if (setting.isNull()) return false;
+
+    setting.remove("key_binding");
+    saveConfigs();
+    return true;
+}
+
+#if defined(HAS_KEYBOARD)
+static void manageKeyBindings() {
+    int idx = 0;
+    returnToMenu = false;
+    while (idx >= 0 && !returnToMenu) {
+        JsonObject bindings = ensureKeyBindingObjectInternal();
+        std::vector<Option> opts;
+        for (JsonPair kv : bindings) {
+            String key = kv.key().c_str();
+            opts.push_back({String("'") + key + "': Remove", [key]() { removeKeyBinding(key); }});
+        }
+        opts.push_back({"Reset All", [=]() { clearKeyBindings(); }});
+        opts.push_back({"Back to Menu", [&]() { returnToMenu = true; }});
+        idx = loopOptions(opts);
+    }
+}
+#endif
 
 void settings_menu() {
     int idx = 0;
@@ -293,6 +384,9 @@ void settings_menu() {
                                saveConfigs();
                            }});
         options.push_back({"Partition Manager", [=]() { partList(); }});
+#if defined(HAS_KEYBOARD)
+        options.push_back({"Manage shortcuts", [=]() { manageKeyBindings(); }});
+#endif
 
         if (dev_mode) options.push_back({"Boot Animation", [=]() { initDisplayLoop(); }});
         if (dev_mode) options.push_back({"Deactivate Dev", [=]() { dev_mode = false; }});
@@ -303,9 +397,9 @@ void settings_menu() {
         options.push_back({"Start CardKb", [=]() { cardkb2_setup(CARDKB2_SDA, CARDKB2_SCL); }});
 #endif
         if (dev_mode) options.push_back({"Reset Configs/Wifi", factoryReset});
-        options.push_back({"Restart", [=]() { FREE_TFT reboot(); }});
+        options.push_back({"Restart", [=]() { return (void)releaseHeapObjectsAndReboot(); }});
 #if !defined(CARDPUTER)
-        options.push_back({"Turn-off", [=]() { FREE_TFT powerOff(); }});
+        options.push_back({"Turn-off", [=]() { powerOff(); }});
 #endif
 
         options.push_back({"Main Menu", [=]() { returnToMenu = true; }});
@@ -502,7 +596,10 @@ void chargeMode() {
     unsigned long tmp = 0;
     while (!check(SelPress)) {
         if (launcherMillis() - tmp > 5000) {
-            displayRedStripe(String(getBattery()) + " %");
+            // The whole point of this mode is a device that goes dark on the charger,
+            // so this repaint must not restart the screen-off timer: it comes round
+            // faster than the shortest timeout and would hold the backlight forever.
+            displayRedStripe(String(getBattery()) + " %", getComplementaryColor(BGCOLOR), ALCOLOR, false);
             tmp = launcherMillis();
         }
     }
@@ -555,11 +652,11 @@ bool saveIntoNVS() {
     if (err != ESP_OK) {
         launcherConsolePrintf("Failed to store settings in NVS: %d", err);
     } else {
-        launcherConsolePrint("Settings stored in NVS successfully");
+        launcherConsolePrintln("Settings stored in NVS successfully");
     }
 
     nvsHandle->commit();
-    if (!saveWifiIntoNVS()) { launcherConsolePrint("saveIntoNVS: failed to store WiFi list"); }
+    if (!saveWifiIntoNVS()) { launcherConsolePrintln("saveIntoNVS: failed to store WiFi list"); }
     return true;
 }
 
@@ -836,11 +933,13 @@ void getConfigs() {
         return;
     }
 
+    favorite = JsonArray();
     DeserializationError error = deserializeJson(settings, file);
     file.close();
 
     if (error) {
         launcherConsolePrintf("getConfigs: parse error (%s), resetting to defaults", error.c_str());
+        favorite = JsonArray();
         settings.clear();
         defaultValues();
         saveConfigs();
@@ -1122,6 +1221,29 @@ esp_err_t readTouchCalibrationItems(
 }
 } // namespace
 
+// Reads the raw calibration values from NVS namespace "touch_cal" without
+// applying them to the live touch driver. Used by loadTouchCalibration() and by
+// the "calibrate show/mirror/swapXY" serial commands, which need to inspect or
+// tweak what's persisted without necessarily re-running the wizard.
+bool getTouchCalibration(uint16_t &x0, uint16_t &x1, uint16_t &y0, uint16_t &y1, uint8_t &rot) {
+    x0 = 0;
+    x1 = 0;
+    y0 = 0;
+    y1 = 0;
+    rot = 0;
+
+    esp_err_t err = ESP_OK;
+    auto nvsHandle = openNamespace(TOUCH_CAL_NAMESPACE, NVS_READONLY, err);
+    if (!nvsHandle) {
+        log_i("getTouchCalibration: no %s namespace found", TOUCH_CAL_NAMESPACE);
+        return false;
+    }
+
+    err = readTouchCalibrationItems(*nvsHandle, x0, x1, y0, y1, rot);
+    rot &= 0x07;
+    return err == ESP_OK && validTouchCalibration(x0, x1, y0, y1);
+}
+
 // Load touch calibration from NVS namespace "touch_cal"
 // Returns true if calibration data is found, provides data via parameters
 bool loadTouchCalibration() {
@@ -1130,36 +1252,19 @@ bool loadTouchCalibration() {
     uint16_t y0;
     uint16_t y1;
     uint8_t rot;
-    esp_err_t err = ESP_OK;
-    auto nvsHandle = openNamespace(TOUCH_CAL_NAMESPACE, NVS_READONLY, err);
-    if (!nvsHandle) {
-        log_i("loadTouchCalibration: no %s namespace found", TOUCH_CAL_NAMESPACE);
+
+    if (!getTouchCalibration(x0, x1, y0, y1, rot)) {
+        launcherConsolePrintln("loadTouchCalibration: Failed to load valid calibration data");
         return false;
     }
 
-    x0 = 0;
-    x1 = 0;
-    y0 = 0;
-    y1 = 0;
-    rot = 0;
-
-    err = readTouchCalibrationItems(*nvsHandle, x0, x1, y0, y1, rot);
-    rot &= 0x07;
-
-    if (err == ESP_OK && validTouchCalibration(x0, x1, y0, y1)) {
-        uint16_t parameters[5] = {x0, x1, y0, y1, rot};
-        extern CYD28_TouchR touch;
-        touch.setTouch(parameters);
-        launcherConsolePrintf(
-            "loadTouchCalibration: Loaded calibration - x0:%u x1:%u y0:%u y1:%u rot:%u\n", x0, x1, y0, y1, rot
-        );
-        return true;
-    }
-
+    uint16_t parameters[5] = {x0, x1, y0, y1, rot};
+    extern CYD28_TouchR touch;
+    touch.setTouch(parameters);
     launcherConsolePrintf(
-        "loadTouchCalibration: Failed to load valid calibration data: %s\n", esp_err_to_name(err)
+        "loadTouchCalibration: Loaded calibration - x0:%u x1:%u y0:%u y1:%u rot:%u\n", x0, x1, y0, y1, rot
     );
-    return false;
+    return true;
 }
 
 // Save touch calibration to NVS namespace "touch_cal"

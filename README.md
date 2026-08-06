@@ -99,16 +99,26 @@ Things that need to be done in future updates
 * [ ] Optimize Storage functions to save Flash
 
 ## Latest Changelog
+* 2.8.1:
+     * [x] Removed `phy_init` partition and increased NVS to 0x5000
+
 * 2.8.0:
      * [x] Port to Xueersi-XiaoMiao
-     * [x] Downloaded firmware update list. Now launcher can check the firmware you downloaded, stored at `{dwn_path}/downloaded.json` and check if there are new versions of these firmwares, and it can download all new files directly to your SDCard if you hit `[Upload All]`.
-     * [x] New Data partition Backup system. Now it saves the relationship between backup and binary on `/bkp/backupData.json` and restores it when reinstalling. App icon will display backup data, and PMan too. Needs SD Card to use this feature.
-     * [x] Optimized RAM, reducing Heap fragmentation
      * [x] Lilygo T-Watch-Ultra now has OTA installing
-     * [x] Added support to M5 CardKB2 and CardKB 1.1. Support was added to M5 devices using grove I2C Port A for: StickC, StickCPlus 1.1, StickCPlus2, StickS3, Tab5, CoreS3, Core2 and Core, Thanks to @cddigi
+     * [x] **Shortcut system for Keyboard devices**: Devices with Keyboard can bind a binary to a key, and install it with the press of one key from Main menu
+     * [x] **Fastboot for Keyboard and Touchscreen devices**: On bootscreen you can press a key or touch the screen to fast boot into an installed firmware
+     * [x] **Added Serial interface**: type "help" on serial to check available commands, you can configure Wifi from there, useful for devices like StickCPlus2 and others without keyboard or touchscreen: e.g. "wifi add MyNetworkSSID MyN37w0rkPWD", calibrate touchscreen, mirror X/Y axis or swap XY axis.
+     * [x] **Downloaded firmware update list**. Now launcher can check the firmware you downloaded, stored at `{dwn_path}/downloaded.json` and check if there are new versions of these firmwares, and it can download all new files directly to your SDCard if you hit `[Update All]`.
+     * [x] **Multi-part binary download**: Firmware composed by multiple files (bootloader.bin, partitions.bin, firmware.bin and data.bin) available on LauncherHub are now downloaded and merged at runtime. It fetches data, one by one, and saves them into on single file to be flashed from the SDCard.
+     * [x] **New Data partition Backup system**: Now it saves the relationship between backup and binary on `/bkp/backupData.json` and restores it when reinstalling. App icon will display backup data, and PMan too. Needs SD Card to use this feature.
+     * [x] **WebUI** now shows partitioning info and allows partition management.
+     * [x] **Added support to M5 CardKB2, CardKB 1.1 and Tab5 keyboard**. Support was added to M5 devices using grove I2C Port A for: StickC, StickCPlus 1.1, StickCPlus2, StickS3, Tab5, CoreS3, Core2 and Core, Thanks to @cddigi
+     * [x] Fixed unheld traffic on TSL 1.3 networks with proper error handling, thanks to @anton-vinogradov
      * [x] Data partitions are now created with the label set in the partition table, and added compatibility to xiaozhi-esp32, that needs more SPIFFS storage, thanks to @QQSHI13
+     * [x] Firmware containing valid data partitions now have their data partition copied as is. Empty partitions are created with minimum size of 0x70000 (448kb) or filling the flash if passes the threshold size.
      * [x] FAT labeled "sys" and "system" are now copied entirely, and the other partitions (FAT or LittleFS) are properly copied and resized to avoid being re-formatted, it gives compatibility to UiFlow, Tactility and some other firmware.
      * [x] E-paper displays now show "Powered Off" when turned off by launcher.
+     * [x] Optimized RAM, reducing Heap fragmentation
      * [x] Fix M5Stack PaperS3 touchscreen https://github.com/bmorcelli/Launcher/issues/338
      * [x] Fix WebUI OTA installation
      * [x] Added "dev" option to Reset Config and wifi credentials

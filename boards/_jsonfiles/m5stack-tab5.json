@@ -8,7 +8,7 @@
       "-DARDUINO_USB_CDC_ON_BOOT=1"
     ],
     "f_cpu": "360000000L",
-    "f_flash": "80000000L",
+    "f_flash": "40000000L",
     "f_psram": "200000000L",
     "psram_mode": "oct",
     "flash_mode": "qio",

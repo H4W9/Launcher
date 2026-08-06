@@ -124,15 +124,11 @@ struct box_t {
 // Retrieves the current keyStroke from InputHandler, resets it after use.
 // This function is used in loopTask to get the latest key press.
 keyStroke _getKeyPress() {
-#ifndef DONT_USE_INPUT_TASK
+    if (xHandle != nullptr) vTaskSuspend(xHandle);
     keyStroke key = KeyStroke;
     KeyStroke.Clear();
+    if (xHandle != nullptr) vTaskResume(xHandle);
     return key;
-#else
-    keyStroke key = KeyStroke;
-    KeyStroke.Clear();
-    return key;
-#endif
 } // Returns a keyStroke that the keyboards won't recognize by default
 
 /*********************************************************************

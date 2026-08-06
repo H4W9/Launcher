@@ -127,6 +127,8 @@ bool ensureWifiInitialized() {
     if (!wifiInitialized) {
         RAM_LOG("before-esp-wifi-init");
         wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+        cfg.nvs_enable = false; // avoid flash writes in Launcher
+
 #if CONFIG_ESP_HOSTED_ENABLED
         // Required for ESP-Hosted remote Wi-Fi; matches Arduino's WiFiGeneric
         // initialization path and avoids stale slave-side persisted config.
@@ -185,9 +187,11 @@ bool launcherWifiStartSta() {
     esp_wifi_set_ps(WIFI_PS_NONE);
     err = esp_wifi_start();
     if (!okOrAlready(err)) return false;
-    EventBits_t bits = xEventGroupWaitBits(
-        wifiEvents, WIFI_STARTED_BIT, pdFALSE, pdFALSE, pdMS_TO_TICKS(3000)
-    );
+#ifdef LAUNCHER_WIFI_TX_POWER
+    esp_wifi_set_max_tx_power(LAUNCHER_WIFI_TX_POWER);
+#endif
+    EventBits_t bits =
+        xEventGroupWaitBits(wifiEvents, WIFI_STARTED_BIT, pdFALSE, pdFALSE, pdMS_TO_TICKS(3000));
     if ((bits & WIFI_STARTED_BIT) == 0) return false;
     return true;
 }
@@ -211,9 +215,8 @@ bool launcherWifiInitHostedSdio(
 #endif
 }
 
-LauncherWifiConnectState launcherWifiConnectStatus(
-    const char *ssid, const char *password, uint32_t timeout_ms
-) {
+LauncherWifiConnectState
+launcherWifiConnectStatus(const char *ssid, const char *password, uint32_t timeout_ms) {
     if (!launcherWifiStartSta()) return LauncherWifiConnectState::Failed;
 
     // Only (re-)initiate if not already waiting for this SSID to connect.

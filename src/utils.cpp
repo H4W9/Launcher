@@ -1,4 +1,8 @@
 #include "utils.h"
+#include "display.h"
+#include "esp_wifi.h"
+#include <SD.h>
+#include <SD_MMC.h>
 #include <esp_heap_caps.h>
 #include <globals.h>
 /*********************************************************************
@@ -94,4 +98,40 @@ void buildFirmwareListFilter(JsonDocument &filter) {
     item["version"] = true;
     item["author"] = true;
     item["star"] = true;
+}
+
+bool releaseHeapObjectsAndReboot(void) {
+    static volatile bool rebootInProgress = false;
+    if (rebootInProgress) {
+        reboot();
+        return true;
+    }
+    rebootInProgress = true;
+
+    if (xHandle != nullptr) vTaskSuspend(xHandle);
+    esp_wifi_stop();
+
+    doc.clear();
+    doc.shrinkToFit();
+
+    JsonArray favorites = settings["favorite"].as<JsonArray>();
+    if (!favorites.isNull()) favorites.clear();
+    favorite = JsonArray();
+
+    settings.clear();
+    settings.shrinkToFit();
+
+    SDM.end();
+    options.clear();
+
+    fileToCopy = "";
+    ssid = "";
+    pwd = "";
+    wui_usr = "";
+    wui_pwd = "";
+    dwn_path = "";
+    lastInstalledApp = "";
+    FREE_TFT
+    reboot();
+    return true;
 }

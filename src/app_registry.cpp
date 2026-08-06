@@ -4,6 +4,7 @@
 #include "idf/launcher_platform.h"
 #include "mykeyboard.h"
 #include "settings.h"
+#include "utils.h"
 #include <esp_flash.h>
 #include <esp_image_format.h>
 #include <esp_ota_ops.h>
@@ -204,6 +205,17 @@ std::vector<LauncherAppMetadata> launcherLoadAppRegistry() {
     return apps;
 }
 
+bool launcherClearAppRegistry() {
+    esp_err_t err = ESP_OK;
+    auto handle = openNamespace(kNamespace, NVS_READWRITE, err);
+    if (!handle) return false;
+
+    err = handle->erase_all();
+    if (err == ESP_OK) err = handle->commit();
+    if (err != ESP_OK) { launcherConsolePrintf("App registry: erase_all failed err=%d\n", err); }
+    return err == ESP_OK;
+}
+
 bool launcherSaveAppMetadata(const LauncherAppMetadata &app) {
     if (app.label.isEmpty()) return false;
 
@@ -373,9 +385,7 @@ bool launcherBootAppByLabel(const char *label) {
     lastInstalledApp = launcherAppDisplayNameForLabel(label);
     saveIntoNVS();
 
-    FREE_TFT
-    reboot();
-    return true;
+    return releaseHeapObjectsAndReboot();
 }
 
 bool launcherDeleteAppByLabel(const char *label) {
@@ -491,10 +501,9 @@ bool launcherDeleteAppByLabel(const char *label) {
     }
 
     launcherRemoveAppMetadata(label);
-    displayError("Restart needed");
-    FREE_TFT
-    reboot();
-    return true;
+    displayMsg("Restart needed");
+
+    return releaseHeapObjectsAndReboot();
 }
 
 bool launcherRenameAppByLabel(const char *label) {
@@ -513,7 +522,7 @@ bool launcherRenameAppByLabel(const char *label) {
     String appNum = loadAppNumForLabel(label);
     if (!appNum.isEmpty()) { updateInstalledAppName(appNum, newName); }
 
-    displayError("App renamed");
+    displayMsg("App renamed");
     return true;
 }
 
@@ -531,12 +540,28 @@ static void showAppBackupMenu(const String &appNum) {
                                 displayError("Backup failed: " + bp.label);
                                 return;
                             }
-                            displayError("Backup saved!");
+                            displayMsg("Backup saved!");
                         }});
     }
 
     opts.push_back({"Back", []() {}});
     loopOptions(opts);
+}
+
+// Restores every data partition of the app from the last backup registered in
+// backupData.json. Destructive (the partition is erased first), so it asks first.
+static void restoreLastDataForApp(const String &appNum) {
+    int choice = -1;
+    std::vector<Option> opts = {
+        {"Restore", [&]() { choice = 0; }},
+        {"Cancel",  [&]() { choice = 1; }},
+    };
+    displayRedStripe("Overwrite current data?");
+    loopOptions(opts);
+    if (choice != 0) return;
+
+    if (!restoreLastBackupForApp(appNum)) displayError("Restore failed");
+    else displayMsg("Data restored");
 }
 
 void launcherShowAppActions(const char *label) {
@@ -558,6 +583,9 @@ void launcherShowAppActions(const char *label) {
         BackupInstallInfo backup = loadInstalledFromConfig(appNum);
         if (!backup.partitions.empty()) {
             appOptions.push_back({"Backup Data", [appNum]() { showAppBackupMenu(appNum); }});
+            if (hasRestorableBackup(backup)) {
+                appOptions.push_back({"Restore Last Data", [appNum]() { restoreLastDataForApp(appNum); }});
+            }
         }
     }
 

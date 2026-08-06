@@ -85,9 +85,19 @@ void _setup_gpio() {
     //    Keyboard.begin();
     launcherGpioInput(0);
     launcherGpioInput(10); // Pin that reads the Battery voltage
+    launcherGpioOutput(3);
+    launcherGpioOutput(4);
     launcherGpioOutput(5);
+    launcherGpioOutput(6);
+    launcherGpioOutput(13);
+    launcherGpioOutput(15);
     // Set GPIO5 HIGH for SD card compatibility (thx for the tip @bmorcelli & 7h30th3r0n3)
+    launcherGpioWrite(3, HIGH);
+    launcherGpioWrite(4, HIGH);
     launcherGpioWrite(5, HIGH);
+    launcherGpioWrite(6, HIGH);
+    launcherGpioWrite(13, HIGH);
+    launcherGpioWrite(15, HIGH);
 }
 volatile bool kb_interrupt = false;
 void IRAM_ATTR gpio_isr_handler(void *arg) { kb_interrupt = true; }

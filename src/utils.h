@@ -16,4 +16,5 @@ ArduinoJson::Allocator *launcherJsonAllocator();
 // deserializeJson keeps just these, keeping the parsed document small.
 void buildFirmwareListFilter(JsonDocument &filter);
 
+bool releaseHeapObjectsAndReboot(void);
 #endif

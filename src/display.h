@@ -44,9 +44,16 @@ void displayCurrentVersion(
     int versionIndex, JsonArray versions
 );
 uint16_t getComplementaryColor(uint16_t color);
+// keepAwake: a stripe is normally put up to be read, so it restarts the screen-off
+// timer. Pass false where a stripe is repainted on a timer by something that wants
+// the screen to go dark anyway — see chargeMode().
 void displayRedStripe(
-    const String &text, uint16_t fgcolor = getComplementaryColor(BGCOLOR), uint16_t bgcolor = ALCOLOR
+    const String &text, uint16_t fgcolor = getComplementaryColor(BGCOLOR), uint16_t bgcolor = ALCOLOR,
+    bool keepAwake = true
 );
+
+void displayMsg(String txt, bool waitKeyPress = false); // Red Stripe + wait/delay
+
 void displayError(String txt, bool waitKeyPress = false); // Red Stripe + wait/delay
 
 void progressHandler(size_t progress, size_t total);
@@ -74,6 +81,16 @@ void drawBatteryStatus(uint8_t bat);
 void drawWifiStatus(bool hasBattery = false);
 
 void drawMainMenu(std::vector<MenuOptions> &opt, int index);
+
+// Draws the installed-app shortcut cards at the top of the bootscreen (touch tap or
+// keyboard digit boots that app directly) and returns the total height, in pixels,
+// occupied by the cards, so callers can use it as a top margin for content below.
+int drawBootAppShortcuts(std::vector<MenuOptions> &opt);
+
+// Lazily-built, cached list of the shortcut cards (label = app icon text, action =
+// boot into that app). Shared between initDisplay (which draws them) and the
+// bootscreen input loop (which hit-tests touches against the same coordinates).
+std::vector<MenuOptions> &launcherBootAppShortcuts();
 
 void TouchFooter(uint16_t color = FGCOLOR);
 

@@ -1,4 +1,6 @@
 #include "webInterface.h"
+#include "app_registry.h"
+#include "backup_manager.h"
 #include "display.h"
 #include "esp_ota_ops.h"
 #include "esp_task_wdt.h"
@@ -16,6 +18,10 @@
 #include "ram_profile.h"
 #include "sd_functions.h"
 #include "settings.h"
+#include "utils.h"
+#include <algorithm>
+#include <cstdlib>
+#include <esp_partition.h>
 #include <globals.h>
 #include <memory>
 #include <vector>
@@ -158,12 +164,11 @@ bool prepareWebDataPartition(
             table, subtype, label.c_str(), payload.partitionSize, entry, error
         );
     }
-
     LauncherPartitionEntry *existing = launcherPartitionFindByLabel(table, label.c_str());
-    // Use the full declared size for "assets" partitions (e.g. xiaozhi-esp32)
+    // Use the full declared size for partitions labeled different from "spiffs"
     bool useRemaining;
     uint32_t requestedSize;
-    if (label == "assets" && declaredSize > LAUNCHER_DEFAULT_SPIFFS_SIZE) {
+    if (label != "spiffs" && label.length() > 0 && declaredSize > LAUNCHER_DEFAULT_SPIFFS_SIZE) {
         useRemaining = false;
         requestedSize = declaredSize;
     } else if (declaredSize > LAUNCHER_DEFAULT_SPIFFS_THRESHOLD) {
@@ -299,7 +304,11 @@ bool parseWebInstallManifest(const String &manifestJson, size_t uploadSize, Stri
         uint32_t sourceOffset = part["sourceOffset"] | 0;
         uint32_t copySize = part["copySize"] | 0;
         uint32_t declaredSize = part["declaredSize"] | copySize;
-        if (copySize == 0) continue;
+        const uint8_t subtype = static_cast<uint8_t>(part["subtype"] | 0xFF);
+        const bool isSpiffsLike = subtype == 0x82 || subtype == 0x83;
+        // the browser reports copySize 0 for a SPIFFS/LittleFS partition it found empty
+        // (formatted, no payload); still let it through so we create it at minimum size
+        if (copySize == 0 && !(isSpiffsLike && declaredSize > 0)) continue;
         if (sourceOffset > uploadSize || copySize > uploadSize - sourceOffset) {
             error = "Manifest range exceeds file";
             return false;
@@ -313,7 +322,6 @@ bool parseWebInstallManifest(const String &manifestJson, size_t uploadSize, Stri
             continue;
         }
 
-        const uint8_t subtype = static_cast<uint8_t>(part["subtype"] | 0xFF);
         String label = part["label"].as<String>();
         if (label.isEmpty()) label = launcherInstallDefaultDataLabel(subtype);
         LauncherInstallDataPartition dp;
@@ -326,9 +334,13 @@ bool parseWebInstallManifest(const String &manifestJson, size_t uploadSize, Stri
                 launcherPartitionFatPayloadPlan(label.c_str(), declaredSize, copySize);
             dp.partitionSize = payload.partitionSize;
             dp.copySize = payload.copySize;
-        } else if (subtype == 0x82 || subtype == 0x83) {
-            // Use the full declared size for "assets" partitions (e.g. xiaozhi-esp32)
-            if (label == "assets" && declaredSize > LAUNCHER_DEFAULT_SPIFFS_SIZE) {
+        } else if (isSpiffsLike) {
+            const bool partitionEmpty = copySize == 0;
+            // accept data partitions as they are if not "spiffs", unless there's no actual
+            // payload to justify the declared size
+            if (partitionEmpty && declaredSize <= LAUNCHER_DEFAULT_SPIFFS_THRESHOLD) {
+                dp.partitionSize = LAUNCHER_DEFAULT_SPIFFS_SIZE;
+            } else if (label != "spiffs" && declaredSize > LAUNCHER_DEFAULT_SPIFFS_SIZE) {
                 dp.partitionSize = declaredSize;
             } else if (declaredSize > LAUNCHER_DEFAULT_SPIFFS_THRESHOLD) {
                 dp.partitionSize = LAUNCHER_INSTALL_USE_REMAINING_SPIFFS_SIZE;
@@ -744,12 +756,12 @@ bool writeUploadData(File &file, const uint8_t *data, size_t len, size_t written
     if (!update) return file.write(data, len) == len;
     if (webInstallCtx.active) {
         if (!writeWebInstallData(data, len)) {
-            return failWebInstall("FAIL 330: " + String(launcherUpdateLastError()));
+            return failWebInstall("WebUI Update Fail: " + String(launcherUpdateLastError()));
         }
         return true;
     }
     if (launcherUpdateWrite(data, len) != len) {
-        displayError("FAIL 330");
+        displayError("WebUI Update Fail: " + String(launcherUpdateLastError()));
         return false;
     }
     progressHandler(written + len, file_size);
@@ -758,9 +770,20 @@ bool writeUploadData(File &file, const uint8_t *data, size_t len, size_t written
 
 bool beginUploadTarget(File &file, const String &filename) {
     if (uploadFolder == "/") uploadFolder = "";
+
+    String effectiveFilename = filename;
+    int firstSlash = effectiveFilename.indexOf('/');
+    if (firstSlash > 0) {
+        String topSegment = effectiveFilename.substring(0, firstSlash);
+        String destTop = uploadFolder.substring(uploadFolder.lastIndexOf('/') + 1);
+        if (!destTop.isEmpty() && destTop == topSegment) {
+            effectiveFilename = effectiveFilename.substring(firstSlash + 1);
+        }
+    }
+
     if (!update) {
-        launcherConsolePrintf("File: %s/%s\n", uploadFolder.c_str(), filename.c_str());
-        String fullPath = uploadFolder + "/" + filename;
+        launcherConsolePrintf("File: %s/%s\n", uploadFolder.c_str(), effectiveFilename.c_str());
+        String fullPath = uploadFolder + "/" + effectiveFilename;
         String dirPath = fullPath.substring(0, fullPath.lastIndexOf("/"));
         if (dirPath.length() > 0) createDirRecursive(dirPath);
         file = SDM.open(fullPath, "w");
@@ -1038,22 +1061,24 @@ esp_err_t rootHandler(httpd_req_t *req) {
 }
 
 esp_err_t systemInfoHandler(httpd_req_t *req) {
-    char response_body[300];
     uint64_t SDTotalBytes = SDM.totalBytes();
     uint64_t SDUsedBytes = SDM.usedBytes();
-    sprintf(
-        response_body,
-        "{\"%s\":\"%s\",\"SD\":{\"%s\":\"%s\",\"%s\":\"%s\",\"%s\":\"%s\"}}",
-        "VERSION",
-        LAUNCHER,
-        "free",
-        humanReadableSize(SDTotalBytes - SDUsedBytes).c_str(),
-        "used",
-        humanReadableSize(SDUsedBytes).c_str(),
-        "total",
-        humanReadableSize(SDTotalBytes).c_str()
-    );
-    sendText(req, "application/json", response_body);
+    uint64_t SDFreeBytes = SDTotalBytes - SDUsedBytes;
+
+    JsonDocument doc;
+    doc["VERSION"] = LAUNCHER;
+    JsonObject sd = doc["SD"].to<JsonObject>();
+    sd["free"] = humanReadableSize(SDFreeBytes);
+    sd["used"] = humanReadableSize(SDUsedBytes);
+    sd["total"] = humanReadableSize(SDTotalBytes);
+    // raw byte counts for the usage bar on the WebUI; the strings above stay human-readable
+    sd["freeBytes"] = static_cast<double>(SDFreeBytes);
+    sd["usedBytes"] = static_cast<double>(SDUsedBytes);
+    sd["totalBytes"] = static_cast<double>(SDTotalBytes);
+
+    String json;
+    serializeJson(doc, json);
+    sendText(req, "application/json", json);
     return ESP_OK;
 }
 
@@ -1340,6 +1365,518 @@ esp_err_t nvsHandler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// ── Partition Manager (PMan) ────────────────────────────────────────────────
+// Web counterpart to the on-device partList()/partitioner.cpp: edits accumulate in
+// webPartCtx (nothing hits flash) until an explicit "apply" action writes the table
+// and reboots, mirroring the on-device dirty-flag flow.
+struct WebPartitionContext {
+    bool loaded = false;
+    bool dirty = false;
+    LauncherPartitionTable table;
+};
+WebPartitionContext webPartCtx;
+
+String webPartitionTypeName(const LauncherPartitionEntry &entry) {
+    if (entry.type == 0x00) return "APP";
+    if (entry.type == 0x01) return "DATA";
+    if (entry.type == 0x02) return "BOOT";
+    if (entry.type == 0x03) return "PTBL";
+    return "UNK";
+}
+
+String webPartitionSubtypeName(const LauncherPartitionEntry &entry) {
+    if (entry.type == 0x00) {
+        if (entry.subtype == 0x00) return "factory";
+        if (entry.subtype >= 0x10 && entry.subtype <= 0x1F) return "ota_" + String(entry.subtype - 0x10);
+        if (entry.subtype == 0x20) return "test";
+    }
+    if (entry.type == 0x01) {
+        if (entry.subtype == 0x00) return "ota";
+        if (entry.subtype == 0x01) return "phy";
+        if (entry.subtype == 0x02) return "nvs";
+        if (entry.subtype == 0x03) return "coredump";
+        if (entry.subtype == 0x81) return "fat";
+        if (entry.subtype == 0x82) return "spiffs";
+        if (entry.subtype == 0x83) return "littlefs";
+    }
+    char out[5] = {0};
+    snprintf(out, sizeof(out), "%02X", entry.subtype);
+    return String(out);
+}
+
+const char *webDataSubtypeName(uint8_t subtype) {
+    if (subtype == ESP_PARTITION_SUBTYPE_DATA_FAT) return "FAT";
+    if (subtype == 0x83) return "LittleFS";
+    return "SPIFFS";
+}
+
+bool isProtectedWebPartition(const LauncherPartitionEntry &entry) {
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (running && running->address == entry.offset) return true;
+    if (entry.isFactoryOrTestApp()) return true;
+    if (entry.type == 0x01 && entry.subtype <= 0x05) return true;
+    return false;
+}
+
+int findWebPartitionIndex(const LauncherPartitionTable &table, uint32_t offset) {
+    for (size_t i = 0; i < table.entries.size(); ++i) {
+        if (table.entries[i].offset == offset) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+bool ensurePartitionContextLoaded(String &error) {
+    if (webPartCtx.loaded && webPartCtx.dirty) return true; // keep staged edits across requests
+    LauncherPartitionTable table;
+    if (!launcherPartitionReadCurrent(table, &error)) return false;
+    webPartCtx.table = table;
+    webPartCtx.dirty = false;
+    webPartCtx.loaded = true;
+    return true;
+}
+
+// Reverse-lookup: which installed app (if any) owns this data partition label, checking
+// the OTA app registry first (fatLabels/spiffsLabel) and falling back to the backup
+// manager's manual "Associate to Bin" links for partitions with no OTA app of their own.
+bool findWebAppForDataLabel(
+    const String &label, const std::vector<LauncherAppMetadata> &apps, String &appName, String &appNum
+) {
+    for (const LauncherAppMetadata &app : apps) {
+        if (app.spiffsLabel == label) {
+            appName = app.name;
+            appNum = app.appNum;
+            return true;
+        }
+        for (const String &fatLabel : app.fatLabels) {
+            if (fatLabel == label) {
+                appName = app.name;
+                appNum = app.appNum;
+                return true;
+            }
+        }
+    }
+    String linkedAppNum = findAppNumByPartitionLabel(label);
+    if (linkedAppNum.isEmpty()) return false;
+    BackupInstallInfo info = loadInstalledFromConfig(linkedAppNum);
+    if (info.appName.isEmpty()) return false;
+    appName = info.appName;
+    appNum = linkedAppNum;
+    return true;
+}
+
+String buildPartitionsJson(const LauncherPartitionTable &table, bool dirty) {
+    JsonDocument doc;
+    doc["flashSize"] = table.flashSize;
+    doc["dirty"] = dirty;
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    std::vector<LauncherAppMetadata> apps = launcherLoadAppRegistry();
+
+    JsonArray entries = doc["entries"].to<JsonArray>();
+    for (size_t i = 0; i < table.entries.size(); ++i) {
+        const LauncherPartitionEntry &entry = table.entries[i];
+        if (entry.offset < 0x10000) continue; // hide bootloader/table system region
+
+        JsonObject o = entries.add<JsonObject>();
+        o["type"] = entry.type;
+        o["subtype"] = entry.subtype;
+        o["typeName"] = webPartitionTypeName(entry);
+        o["subtypeName"] = webPartitionSubtypeName(entry);
+        o["label"] = entry.label;
+        o["offset"] = entry.offset;
+        o["size"] = entry.size;
+        o["flags"] = entry.flags;
+        bool prot = isProtectedWebPartition(entry);
+        o["protected"] = prot;
+        o["running"] = running && running->address == entry.offset;
+
+        if (entry.isApp()) {
+            String appName = launcherAppDisplayNameForLabel(entry.label);
+            if (!appName.isEmpty()) o["appName"] = appName;
+            JsonArray dataLabels = o["dataLabels"].to<JsonArray>();
+            for (const String &fatLabel : launcherAppFatLabelsForLabel(entry.label)) dataLabels.add(fatLabel);
+            String spiffsLabel = launcherAppSpiffsLabelForLabel(entry.label);
+            if (!spiffsLabel.isEmpty()) dataLabels.add(spiffsLabel);
+        } else if (entry.isData()) {
+            String appName, appNum;
+            if (findWebAppForDataLabel(String(entry.label), apps, appName, appNum)) {
+                o["appName"] = appName;
+                o["appNum"] = appNum;
+            }
+        }
+
+        if (!prot) {
+            uint32_t minOffset = LAUNCHER_PARTITION_TABLE_OFFSET + LAUNCHER_PARTITION_TABLE_SIZE;
+            uint32_t maxOffset = table.flashSize;
+            const uint32_t currentStart = entry.offset;
+            const uint32_t currentEnd = entry.offset + entry.size;
+            for (size_t j = 0; j < table.entries.size(); ++j) {
+                if (j == i) continue;
+                const LauncherPartitionEntry &other = table.entries[j];
+                const uint32_t otherEnd = other.offset + other.size;
+                if (otherEnd <= currentStart && otherEnd > minOffset) minOffset = otherEnd;
+                if (other.offset >= currentEnd && other.offset < maxOffset) maxOffset = other.offset;
+            }
+            o["minOffset"] = minOffset;
+            o["maxOffset"] = maxOffset;
+            o["alignment"] = launcherPartitionAlignment(entry.type, entry.subtype);
+        }
+    }
+
+    JsonArray freeRanges = doc["freeRanges"].to<JsonArray>();
+    for (const LauncherPartitionRange &range : launcherPartitionFreeRanges(table)) {
+        if (range.size == 0) continue;
+        JsonObject o = freeRanges.add<JsonObject>();
+        o["offset"] = range.offset;
+        o["size"] = range.size;
+    }
+
+    String json;
+    serializeJson(doc, json);
+    return json;
+}
+
+bool webPartitionResize(WebParamMap &params, String &error) {
+    if (!ensurePartitionContextLoaded(error)) return false;
+    if (!params.has("offset") || !params.has("size")) {
+        error = "Missing offset or size";
+        return false;
+    }
+    uint32_t offset = strtoul(params.get("offset").c_str(), nullptr, 0);
+    uint32_t newSize = strtoul(params.get("size").c_str(), nullptr, 0);
+    uint32_t newOffset =
+        params.has("newOffset") ? strtoul(params.get("newOffset").c_str(), nullptr, 0) : offset;
+
+    LauncherPartitionTable &table = webPartCtx.table;
+    int index = findWebPartitionIndex(table, offset);
+    if (index < 0) {
+        error = "Partition not found";
+        return false;
+    }
+    if (isProtectedWebPartition(table.entries[index])) {
+        error = "Protected partition";
+        return false;
+    }
+    if (newSize == 0) {
+        error = "Invalid size";
+        return false;
+    }
+
+    LauncherPartitionTable edited = table;
+    edited.entries[index].offset = newOffset;
+    edited.entries[index].size = newSize;
+    if (!launcherPartitionValidate(edited, &error)) return false;
+    if (!launcherPartitionCompact(edited, &error)) return false;
+    table = edited;
+    webPartCtx.dirty = true;
+    return true;
+}
+
+bool webPartitionCreate(WebParamMap &params, String &error) {
+    if (!ensurePartitionContextLoaded(error)) return false;
+    if (!params.has("type") || !params.has("subtype") || !params.has("label") || !params.has("size")) {
+        error = "Missing type, subtype, label or size";
+        return false;
+    }
+    uint8_t type = static_cast<uint8_t>(strtoul(params.get("type").c_str(), nullptr, 0));
+    uint8_t subtype = static_cast<uint8_t>(strtoul(params.get("subtype").c_str(), nullptr, 0));
+    String label = params.get("label");
+    if (label.isEmpty()) {
+        error = "Label required";
+        return false;
+    }
+    uint32_t alignment = launcherPartitionAlignment(type, subtype);
+    uint32_t size = launcherAlignUp(strtoul(params.get("size").c_str(), nullptr, 0), alignment);
+
+    LauncherPartitionTable edited = webPartCtx.table;
+    LauncherPartitionEntry created;
+    created.type = type;
+    created.subtype = subtype;
+    created.flags = 0;
+    memset(created.label, 0, sizeof(created.label));
+    strncpy(created.label, label.c_str(), 15);
+
+    if (params.has("offset")) {
+        created.offset = strtoul(params.get("offset").c_str(), nullptr, 0);
+    } else {
+        LauncherPartitionRange range;
+        if (!launcherPartitionFindFreeRange(edited, size, alignment, range, &error)) return false;
+        created.offset = range.offset;
+    }
+    created.size = size;
+
+    if (type == 0x00) {
+        int nextSubtype = launcherPartitionNextOtaSubtype(edited);
+        if (nextSubtype < 0) {
+            error = "No OTA slot available";
+            return false;
+        }
+        created.subtype = static_cast<uint8_t>(nextSubtype);
+    }
+
+    if (!launcherPartitionAdd(edited, created, &error)) return false;
+    if (!launcherPartitionCompact(edited, &error)) return false;
+    webPartCtx.table = edited;
+    webPartCtx.dirty = true;
+    return true;
+}
+
+bool webPartitionDelete(WebParamMap &params, String &error) {
+    if (!ensurePartitionContextLoaded(error)) return false;
+    if (!params.has("offset")) {
+        error = "Missing offset";
+        return false;
+    }
+    uint32_t offset = strtoul(params.get("offset").c_str(), nullptr, 0);
+    LauncherPartitionTable &table = webPartCtx.table;
+    int index = findWebPartitionIndex(table, offset);
+    if (index < 0) {
+        error = "Partition not found";
+        return false;
+    }
+    if (isProtectedWebPartition(table.entries[index])) {
+        error = "Protected partition";
+        return false;
+    }
+
+    LauncherPartitionTable edited = table;
+    edited.entries.erase(edited.entries.begin() + index);
+    if (!launcherPartitionValidate(edited, &error)) return false;
+    if (!launcherPartitionCompact(edited, &error)) return false;
+    table = edited;
+    webPartCtx.dirty = true;
+    return true;
+}
+
+bool webPartitionFormat(WebParamMap &params, String &error) {
+    if (webPartCtx.dirty) {
+        error = "Apply or discard pending changes first";
+        return false;
+    }
+    if (!ensurePartitionContextLoaded(error)) return false;
+    if (!params.has("offset")) {
+        error = "Missing offset";
+        return false;
+    }
+    uint32_t offset = strtoul(params.get("offset").c_str(), nullptr, 0);
+    int index = findWebPartitionIndex(webPartCtx.table, offset);
+    if (index < 0) {
+        error = "Partition not found";
+        return false;
+    }
+    const LauncherPartitionEntry &entry = webPartCtx.table.entries[index];
+    if (isProtectedWebPartition(entry) || !entry.isData()) {
+        error = "Cannot format";
+        return false;
+    }
+    if (!launcherRawPrepareDataPartition(entry.offset, entry.size)) {
+        error = "Format failed";
+        return false;
+    }
+    return true;
+}
+
+bool webPartitionApply(String &error) {
+    if (!ensurePartitionContextLoaded(error)) return false;
+    LauncherPartitionTable target = webPartCtx.table;
+    if (!launcherPartitionCompact(target, &error)) return false;
+    if (!launcherPartitionValidate(target, &error)) return false;
+
+    LauncherPartitionTable current;
+    if (!launcherPartitionReadCurrent(current, &error)) return false;
+    if (!launcherPartitionMigrateMovedData(current, target, &error)) return false;
+    if (!launcherPartitionWriteGeneratedTable(target, &error)) return false;
+
+    webPartCtx.dirty = false;
+    webPartCtx.loaded = false;
+    shouldReboot = true;
+    return true;
+}
+
+bool webPartitionDiscard(String &error) {
+    LauncherPartitionTable table;
+    if (!launcherPartitionReadCurrent(table, &error)) return false;
+    webPartCtx.table = table;
+    webPartCtx.dirty = false;
+    webPartCtx.loaded = true;
+    return true;
+}
+
+// Headless equivalent of dumpPartition() for data partitions that aren't linked to any
+// installed app (no appNum to file the backup under in backupData.json).
+String webBackupPartitionRaw(const LauncherPartitionEntry &entry) {
+    if (!setupSdCard()) return "";
+    if (!SDM.exists("/bkp")) SDM.mkdir("/bkp");
+
+    const esp_partition_t *partition =
+        esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, entry.label);
+    if (!partition) return "";
+
+    String base = String("/bkp/") + entry.label;
+    String output = base + ".bin";
+    int suffix = 0;
+    while (SDM.exists(output)) {
+        suffix++;
+        output = base + String(suffix) + ".bin";
+    }
+
+    File outFile = SDM.open(output, FILE_WRITE, true);
+    if (!outFile) return "";
+
+    std::unique_ptr<uint8_t[]> buffer(new (std::nothrow) uint8_t[4096]);
+    if (!buffer) {
+        outFile.close();
+        return "";
+    }
+    for (size_t offset = 0; offset < partition->size; offset += 4096) {
+        size_t chunk = std::min<size_t>(4096, partition->size - offset);
+        if (esp_partition_read(partition, offset, buffer.get(), chunk) != ESP_OK) {
+            outFile.close();
+            return "";
+        }
+        outFile.write(buffer.get(), chunk);
+    }
+    outFile.close();
+    return output;
+}
+
+bool webPartitionBackup(WebParamMap &params, String &error, String &outPath) {
+    if (!params.has("label")) {
+        error = "Missing label";
+        return false;
+    }
+    String label = params.get("label");
+    String appNum = findAppNumByPartitionLabel(label);
+    if (!appNum.isEmpty()) {
+        LauncherPartitionTable table;
+        String readError;
+        String typeName = "SPIFFS";
+        if (launcherPartitionReadCurrent(table, &readError)) {
+            const LauncherPartitionEntry *entry = launcherPartitionFindByLabel(table, label.c_str());
+            if (entry) typeName = webDataSubtypeName(entry->subtype);
+        }
+        outPath = backupPartition(appNum, label.c_str(), typeName.c_str());
+    } else {
+        LauncherPartitionTable table;
+        if (!launcherPartitionReadCurrent(table, &error)) return false;
+        const LauncherPartitionEntry *entry = launcherPartitionFindByLabel(table, label.c_str());
+        if (!entry) {
+            error = "Partition not found";
+            return false;
+        }
+        outPath = webBackupPartitionRaw(*entry);
+    }
+    if (outPath.isEmpty()) {
+        error = "Backup failed";
+        return false;
+    }
+    return true;
+}
+
+bool webPartitionRestore(WebParamMap &params, String &error) {
+    if (!params.has("label") || !params.has("path")) {
+        error = "Missing label or path";
+        return false;
+    }
+    String label = params.get("label");
+    String path = params.get("path");
+    if (!restorePartitionFromBackup(label.c_str(), path.c_str())) {
+        error = "Restore failed";
+        return false;
+    }
+    return true;
+}
+
+void collectWebPartitionBackups(JsonArray &arr, const String &label) {
+    String appNum = findAppNumByPartitionLabel(label);
+    if (!appNum.isEmpty()) {
+        BackupInstallInfo info = loadInstalledFromConfig(appNum);
+        for (const BackupPartitionInfo &bp : info.partitions) {
+            if (bp.label != label || bp.lastBackupPath.isEmpty()) continue;
+            JsonObject o = arr.add<JsonObject>();
+            o["path"] = bp.lastBackupPath;
+            o["type"] = bp.type;
+        }
+        return;
+    }
+    if (!setupSdCard() || !SDM.exists("/bkp")) return;
+    File root = SDM.open("/bkp");
+    if (!root || !root.isDirectory()) return;
+    for (File f = root.openNextFile(); f; f = root.openNextFile()) {
+        String name = String(f.name());
+        bool isDir = f.isDirectory();
+        f.close();
+        int slash = name.lastIndexOf('/');
+        String base = slash >= 0 ? name.substring(slash + 1) : name;
+        if (!isDir && base.startsWith(label) && base.endsWith(".bin")) {
+            JsonObject o = arr.add<JsonObject>();
+            o["path"] = name.startsWith("/") ? name : "/bkp/" + name;
+            o["type"] = "RAW";
+        }
+    }
+    root.close();
+}
+
+esp_err_t partitionsHandler(httpd_req_t *req) {
+    if (!checkUserWebAuth(req)) return ESP_OK;
+
+    if (req->method == HTTP_GET) {
+        String listParam = queryValue(req, "list");
+        if (listParam == "backups") {
+            JsonDocument doc;
+            JsonArray arr = doc["backups"].to<JsonArray>();
+            collectWebPartitionBackups(arr, queryValue(req, "label"));
+            String json;
+            serializeJson(doc, json);
+            sendText(req, "application/json", json);
+            return ESP_OK;
+        }
+
+        String error;
+        if (!ensurePartitionContextLoaded(error)) {
+            sendText(req, 400, "text/plain", error.length() ? error : "Partition read failed");
+            return ESP_OK;
+        }
+        sendText(req, "application/json", buildPartitionsJson(webPartCtx.table, webPartCtx.dirty));
+        return ESP_OK;
+    }
+
+    WebParamMap params = readParams(req);
+    String action = params.get("action");
+    String error;
+    String resultPath;
+    bool ok;
+
+    if (action == "resize") ok = webPartitionResize(params, error);
+    else if (action == "create") ok = webPartitionCreate(params, error);
+    else if (action == "delete") ok = webPartitionDelete(params, error);
+    else if (action == "format") ok = webPartitionFormat(params, error);
+    else if (action == "apply") ok = webPartitionApply(error);
+    else if (action == "discard") ok = webPartitionDiscard(error);
+    else if (action == "backup") ok = webPartitionBackup(params, error, resultPath);
+    else if (action == "restore") ok = webPartitionRestore(params, error);
+    else {
+        ok = false;
+        error = "Unknown action";
+    }
+
+    if (!ok) {
+        sendText(req, 400, "text/plain", error.length() ? error : "Failed");
+        return ESP_OK;
+    }
+    if (action == "backup") {
+        JsonDocument doc;
+        doc["path"] = resultPath;
+        String json;
+        serializeJson(doc, json);
+        sendText(req, "application/json", json);
+    } else if (action == "apply") {
+        sendText(req, "text/plain", "OK"); // device reboots from the main loop once the response flushes
+    } else {
+        sendText(req, "application/json", buildPartitionsJson(webPartCtx.table, webPartCtx.dirty));
+    }
+    return ESP_OK;
+}
+
 esp_err_t sdPinsHandler(httpd_req_t *req) {
     if (!checkUserWebAuth(req)) return ESP_OK;
     String misoStr = queryValue(req, "miso");
@@ -1436,6 +1973,8 @@ void configureWebServer() {
     registerHandler("/editfile", HTTP_POST, editfileHandler);
     registerHandler("/nvs", HTTP_GET, nvsHandler);
     registerHandler("/nvs", HTTP_POST, nvsHandler);
+    registerHandler("/partitions", HTTP_GET, partitionsHandler);
+    registerHandler("/partitions", HTTP_POST, partitionsHandler);
     registerHandler("/sdpins", HTTP_GET, sdPinsHandler);
     registerHandler("/wifi", HTTP_GET, wifiHandler);
     registerHandler("/*", HTTP_GET, fallbackHandler);
@@ -1489,10 +2028,7 @@ void startWebUiLoopCommon(bool mode_ap) {
 
     while (1) {
 #endif
-        if (shouldReboot) {
-            FREE_TFT
-            reboot();
-        }
+        if (shouldReboot) { return (void)releaseHeapObjectsAndReboot(); }
         if (updateFromSd_var) {
             updateFromSD(fileToCopy);
             updateFromSd_var = false;

@@ -29,5 +29,6 @@ bool launcherBootAppByLabel(const char *label);
 bool launcherDeleteAppByLabel(const char *label);
 bool launcherRenameAppByLabel(const char *label);
 String launcherAppNameFromFile(const String &source);
+bool launcherClearAppRegistry();
 
 #endif

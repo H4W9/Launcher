@@ -23,9 +23,8 @@ struct LauncherRequiredBootPartition {
 };
 
 constexpr LauncherRequiredBootPartition kRequiredBootPartitions[] = {
-    {"nvs",      0x01, 0x02, 0x9000, 0x4000},
-    {"otadata",  0x01, 0x00, 0xD000, 0x2000},
-    {"phy_init", 0x01, 0x01, 0xF000, 0x1000},
+    {"nvs",     0x01, 0x02, 0x9000, 0x5000},
+    {"otadata", 0x01, 0x00, 0xE000, 0x2000},
 };
 
 struct LauncherUpdateContext {
@@ -144,6 +143,15 @@ bool writeRawFlashBytes(uint32_t address, const uint8_t *data, size_t len) {
         esp_err_t eraseErr =
             esp_flash_erase_region(nullptr, ctx.raw_address + eraseStart, eraseEnd - eraseStart);
         if (eraseErr != ESP_OK) {
+            launcherDelayMs(20);
+            eraseErr = esp_flash_erase_region(nullptr, ctx.raw_address + eraseStart, eraseEnd - eraseStart);
+        }
+        if (eraseErr != ESP_OK) {
+            launcherConsolePrintf(
+                "Flash erase failed at 0x%08X (%s)\n",
+                (unsigned)(ctx.raw_address + eraseStart),
+                esp_err_to_name(eraseErr)
+            );
             setError(LAUNCHER_UPDATE_ERROR_ERASE);
             return false;
         }
@@ -152,6 +160,11 @@ bool writeRawFlashBytes(uint32_t address, const uint8_t *data, size_t len) {
 
     esp_err_t err = esp_flash_write(nullptr, data, address, len);
     if (err != ESP_OK) {
+        launcherDelayMs(20);
+        err = esp_flash_write(nullptr, data, address, len);
+    }
+    if (err != ESP_OK) {
+        launcherConsolePrintf("Flash write failed at 0x%08X (%s)\n", (unsigned)address, esp_err_to_name(err));
         setError(LAUNCHER_UPDATE_ERROR_WRITE);
         return false;
     }
@@ -212,6 +225,15 @@ bool writeFlash(size_t offset, const uint8_t *data, size_t len) {
 
         esp_err_t eraseErr = esp_partition_erase_range(ctx.partition, eraseStart, eraseEnd - eraseStart);
         if (eraseErr != ESP_OK) {
+            launcherDelayMs(20);
+            eraseErr = esp_partition_erase_range(ctx.partition, eraseStart, eraseEnd - eraseStart);
+        }
+        if (eraseErr != ESP_OK) {
+            launcherConsolePrintf(
+                "Partition erase failed at offset 0x%08X (%s)\n",
+                (unsigned)eraseStart,
+                esp_err_to_name(eraseErr)
+            );
             setError(LAUNCHER_UPDATE_ERROR_ERASE);
             return false;
         }
@@ -220,6 +242,13 @@ bool writeFlash(size_t offset, const uint8_t *data, size_t len) {
 
     esp_err_t err = esp_partition_write(ctx.partition, offset, data, len);
     if (err != ESP_OK) {
+        launcherDelayMs(20);
+        err = esp_partition_write(ctx.partition, offset, data, len);
+    }
+    if (err != ESP_OK) {
+        launcherConsolePrintf(
+            "Partition write failed at offset 0x%08X (%s)\n", (unsigned)offset, esp_err_to_name(err)
+        );
         setError(LAUNCHER_UPDATE_ERROR_WRITE);
         return false;
     }
@@ -536,12 +565,25 @@ bool launcherRawUpdateStream(
 
     while (written < imageSize) {
         const size_t to_read = std::min(sizeof(buffer), imageSize - written);
-        const int bytes_read = source.readBytes(buffer, to_read);
+
+        int bytes_read = source.readBytes(buffer, to_read);
         if (bytes_read <= 0) {
+            launcherDelayMs(20);
+            bytes_read = source.readBytes(buffer, to_read);
+        }
+        if (bytes_read <= 0) {
+            launcherConsolePrintln("Update stream: read failed");
             setError(LAUNCHER_UPDATE_ERROR_STREAM);
             return false;
         }
-        if (launcherRawUpdateWrite(buffer, bytes_read) != static_cast<size_t>(bytes_read)) return false;
+        if (launcherRawUpdateWrite(buffer, bytes_read) != static_cast<size_t>(bytes_read)) {
+            launcherConsolePrintf(
+                "Update stream: flash write failed at partition offset 0x%08X (%s)\n",
+                (unsigned)written,
+                launcherUpdateLastErrorName()
+            );
+            return false;
+        }
         written += bytes_read;
         if (cb) cb(written, imageSize);
         launcherDelayMs(1);
