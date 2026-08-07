@@ -2,6 +2,7 @@
 #include "settings.h"
 #include "display.h"
 #include "esp_mac.h"
+#include "idf/idf_wifi.h"
 #include "idf/launcher_platform.h"
 #include "mykeyboard.h"
 #include "nvs.h"
@@ -29,6 +30,9 @@
 void defaultValues();
 
 namespace {
+// Avoids re-erasing/rewriting the whole l_wifi NVS namespace on every
+// saveConfigs() call when the wifi list itself hasn't changed.
+bool wifiListDirty = true;
 uint32_t crc32(const uint8_t *data, size_t length) {
     uint32_t crc = 0xFFFFFFFF;
     while (length--) {
@@ -135,6 +139,7 @@ void factoryReset() {
     backupConfigFileIfPresent();
     favorite = JsonArray();
     settings.clear();
+    wifiListDirty = true;
     defaultValues();
     saveConfigs();
 }
@@ -242,6 +247,7 @@ bool setWifiCredential(const String &ssidValue, const String &passwordValue, boo
     target["ssid"] = ssidValue;
     target["pwd"] = passwordValue;
 
+    wifiListDirty = true;
     if (persist) { saveConfigs(); }
     return true;
 }
@@ -253,6 +259,7 @@ bool removeWifiCredential(const String &ssidValue) {
     for (size_t i = 0; i < wifiList.size(); i++) {
         if (wifiList[i]["ssid"].as<String>() == ssidValue) {
             wifiList.remove(i);
+            wifiListDirty = true;
             saveConfigs();
             return true;
         }
@@ -265,6 +272,7 @@ bool clearWifiCredentials() {
     if (wifiList.isNull()) return false;
 
     while (wifiList.size() > 0) wifiList.remove(0);
+    wifiListDirty = true;
     saveConfigs();
     return true;
 }
@@ -396,6 +404,14 @@ void settings_menu() {
 #if defined(USE_CARDKB2) && defined(CARDKB2_SDA) && defined(CARDKB2_SCL)
         options.push_back({"Start CardKb", [=]() { cardkb2_setup(CARDKB2_SDA, CARDKB2_SCL); }});
 #endif
+        // Only worth offering when the co-processor was latched off: clearing the
+        // guard re-arms the bring-up, which only runs at boot, so reboot with it.
+        if (!hostedWifiAvailable) {
+            options.push_back({"Retry WiFi Module", [=]() {
+                                   launcherWifiHostedResetGuard();
+                                   releaseHeapObjectsAndReboot();
+                               }});
+        }
         if (dev_mode) options.push_back({"Reset Configs/Wifi", factoryReset});
         options.push_back({"Restart", [=]() { return (void)releaseHeapObjectsAndReboot(); }});
 #if !defined(CARDPUTER)
@@ -677,6 +693,8 @@ bool saveSessionToken(const String &token) {
 }
 
 bool saveWifiIntoNVS() {
+    if (!wifiListDirty) return true;
+
     JsonArray wifiList = ensureWifiListInternal();
     if (wifiList.isNull()) return false;
 
@@ -711,6 +729,7 @@ bool saveWifiIntoNVS() {
     }
 
     nvsHandle->commit();
+    wifiListDirty = false;
     return true;
 }
 
@@ -1085,9 +1104,8 @@ void getConfigs() {
 **  save configs into JSON config.conf file
 **********************************************************************/
 void saveConfigs() {
-    if (!setupSdCard()) {
+    if (!sdcardMounted) {
         saveIntoNVS();
-        saveWifiIntoNVS();
         return;
     }
 
@@ -1096,7 +1114,6 @@ void saveConfigs() {
     if (setting.isNull()) {
         launcherConsolePrintln("saveConfigs: failed to prepare settings root");
         saveIntoNVS();
-        saveWifiIntoNVS();
         return;
     }
 
@@ -1147,18 +1164,16 @@ void saveConfigs() {
         }
     }
 
-    // Write to a temp file first, then atomically rename — original is safe if write fails
-    String tmpPath = String(CONFIG_FILE) + ".tmp";
-    if (SDM.exists(tmpPath)) SDM.remove(tmpPath);
-
-    File file = SDM.open(tmpPath, FILE_WRITE, true);
+    // Overwrite config.conf directly (FILE_WRITE truncates on open)
+    File file = SDM.open(CONFIG_FILE, FILE_WRITE, true);
     size_t written = 0;
     if (file) {
         written = serializeJsonPretty(settings, file);
         file.flush();
         file.close();
     } else {
-        launcherConsolePrintln("saveConfigs: failed to open temp file for writing");
+        launcherConsolePrintln("saveConfigs: failed to open config.conf for writing");
+        sdcardMounted = false;
     }
 
     // Restore plaintext passwords in memory immediately after write
@@ -1175,21 +1190,13 @@ void saveConfigs() {
     }
 
     if (written >= 5) {
-        if (SDM.exists(CONFIG_FILE)) SDM.remove(CONFIG_FILE);
-        if (SDM.rename(tmpPath, CONFIG_FILE)) {
-            log_i("saveConfigs: config.conf written successfully");
-        } else {
-            launcherConsolePrintf("saveConfigs: rename failed, temp file left at %s", tmpPath.c_str());
-        }
+        log_i("saveConfigs: config.conf written successfully");
     } else {
-        launcherConsolePrintf(
-            "saveConfigs: write failed (written=%u), original config.conf preserved", written
-        );
-        if (SDM.exists(tmpPath)) SDM.remove(tmpPath);
+        sdcardMounted = false;
+        launcherConsolePrintf("saveConfigs: write failed (written=%u)", written);
     }
 
     saveIntoNVS();
-    saveWifiIntoNVS();
 }
 
 #if defined(HAS_RESISTIVE_TOUCH)

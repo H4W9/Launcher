@@ -81,6 +81,8 @@
             - { env: "lilygo-t-dongle-c5-tft"     }
             - { env: "lilygo-t-display-S3-touch"  }
             - { env: "lilygo-t-display-S3-pro"    }
+            - { env: "lilygo-t-display-p4"        }
+            - { env: "lilygo-t-display-p4-amoled" }
             - { env: "lilygo-t-embed"             }
             - { env: "lilygo-t-embed-cc1101"      }
             - { env: "lilygo-t-lora-pager"        }

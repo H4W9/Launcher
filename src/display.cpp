@@ -73,6 +73,13 @@ Arduino_ESP32RGBPanel *bus = new Arduino_ESP32RGBPanel(
 );
 #elif defined(TFT_QSPI)
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(TFT_CS, TFT_SCLK, TFT_D0, TFT_D1, TFT_D2, TFT_D3);
+#elif defined(TFT_DSI_PANEL)
+Arduino_ESP32DSIPanel *bus = new Arduino_ESP32DSIPanel(
+    TFT_HSYNC_PULSE_WIDTH /* hsync_pulse_width */, TFT_HSYNC_BACK_PORCH /* hsync_back_porch */,
+    TFT_HSYNC_FRONT_PORCH /* hsync_front_porch */, TFT_VSYNC_PULSE_WIDTH /* vsync_pulse_width */,
+    TFT_VSYNC_BACK_PORCH /*vsync_back_porch  */, TFT_VSYNC_FRONT_PORCH /* vsync_front_porch */,
+    TFT_PREF_SPEED /* prefer_speed */
+);
 #else // SPI Data Bus shared with SDCard and other SPIClass devices
 Arduino_DataBus *bus = new Arduino_HWSPI(TFT_DC, TFT_CS, TFT_SCLK, TFT_MOSI, TFT_MISO, &SPI);
 #endif

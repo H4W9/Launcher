@@ -5,11 +5,16 @@
 #include "esp_event.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/event_groups.h"
+#include "freertos/task.h"
 #include "lwip/ip4_addr.h"
 #include "mdns.h"
+#include "nvs.h"
+#include "nvs_handle.hpp"
+#include <memory>
 #include <stdio.h>
 #include <string.h>
 
@@ -212,6 +217,127 @@ bool launcherWifiInitHostedSdio(
     (void)d3;
     (void)rst;
     return true;
+#endif
+}
+
+bool hostedWifiAvailable = true;
+
+namespace {
+// NVS namespace/key holding the verdict from the last hosted bring-up attempt.
+constexpr const char *kHostedNs = "launcher";
+constexpr const char *kHostedKey = "hosted_st";
+
+enum HostedGuardState : uint8_t {
+    kHostedUntried = 0,
+    kHostedAttempting = 1, // written just before the call, cleared right after
+    kHostedGood = 2,
+    kHostedBad = 3,
+};
+
+// How long to give the co-processor bring-up before giving up on it. A healthy
+// one is dominated by CONFIG_ESP_HOSTED_SDIO_RESET_DELAY_MS (1500 ms) plus
+// enumeration and handshake, so this is a wide margin. A broken one otherwise
+// grinds for ~19 s and then panics: esp_hosted exposes no timeout knob and the
+// IDF libs are pre-built, so the wait cannot be shortened from the inside - but
+// we do not have to sit through it.
+constexpr uint32_t kHostedInitTimeoutMs = 8000;
+
+struct HostedInitCtx {
+    int8_t clk, cmd, d0, d1, d2, d3, rst;
+    volatile bool done;
+    volatile bool result;
+};
+
+void hostedInitTask(void *arg) {
+    auto *ctx = static_cast<HostedInitCtx *>(arg);
+    ctx->result =
+        launcherWifiInitHostedSdio(ctx->clk, ctx->cmd, ctx->d0, ctx->d1, ctx->d2, ctx->d3, ctx->rst);
+    ctx->done = true;
+    vTaskDelete(nullptr);
+}
+
+uint8_t hostedGuardRead() {
+    esp_err_t err = ESP_OK;
+    auto handle = nvs::open_nvs_handle(kHostedNs, NVS_READONLY, &err);
+    if (err != ESP_OK || !handle) return kHostedUntried;
+    uint8_t state = kHostedUntried;
+    if (handle->get_item(kHostedKey, state) != ESP_OK) return kHostedUntried;
+    return state;
+}
+
+void hostedGuardWrite(uint8_t state) {
+    esp_err_t err = ESP_OK;
+    auto handle = nvs::open_nvs_handle(kHostedNs, NVS_READWRITE, &err);
+    if (err != ESP_OK || !handle) return;
+    if (handle->set_item(kHostedKey, state) == ESP_OK) handle->commit();
+}
+} // namespace
+
+void launcherWifiHostedResetGuard() { hostedGuardWrite(kHostedUntried); }
+
+bool launcherWifiInitHostedSdioGuarded(
+    int8_t clk, int8_t cmd, int8_t d0, int8_t d1, int8_t d2, int8_t d3, int8_t rst
+) {
+#if CONFIG_ESP_HOSTED_ENABLED
+    // There is no cheap way to ask the co-processor "are you running ESP-Hosted?"
+    // before talking to it - the handshake that would tell us is the very thing
+    // that hangs. So instead of probing, we detect the damage after the fact: the
+    // flag below survives the panic, and finding it still set means the previous
+    // boot died inside the bring-up.
+    const uint8_t state = hostedGuardRead();
+    if (state == kHostedAttempting) {
+        hostedGuardWrite(kHostedBad);
+        hostedWifiAvailable = false;
+        printf("[hosted] previous bring-up crashed the device - Wi-Fi disabled.\n"
+               "[hosted] flash the esp_hosted co-processor firmware, then run "
+               "'wifi hosted retry'.\n");
+        return false;
+    }
+    if (state == kHostedBad) {
+        hostedWifiAvailable = false;
+        printf("[hosted] co-processor marked unavailable - Wi-Fi disabled. "
+               "Run 'wifi hosted retry' to probe again.\n");
+        return false;
+    }
+
+    hostedGuardWrite(kHostedAttempting);
+
+    // Run the bring-up on its own task so a stuck co-processor cannot hold the
+    // boot hostage. Static because the task keeps referencing it if we time out.
+    static HostedInitCtx ctx;
+    ctx = {clk, cmd, d0, d1, d2, d3, rst, false, false};
+    // The hosted stack nests SDIO + RPC, so it needs a roomy stack.
+    if (xTaskCreate(hostedInitTask, "hosted_init", 8192, &ctx, 5, nullptr) != pdPASS) {
+        hostedGuardWrite(kHostedBad);
+        hostedWifiAvailable = false;
+        printf("[hosted] could not start bring-up task - Wi-Fi disabled.\n");
+        return false;
+    }
+
+    const int64_t deadlineUs = esp_timer_get_time() + (int64_t)kHostedInitTimeoutMs * 1000;
+    while (!ctx.done && esp_timer_get_time() < deadlineUs) { vTaskDelay(pdMS_TO_TICKS(20)); }
+
+    if (!ctx.done) {
+        // The task is wedged somewhere in SDIO and cannot be safely killed, and
+        // letting it run on risks it panicking later at an arbitrary point. Bank
+        // the verdict and restart now - deliberately, and roughly 10 s sooner
+        // than the crash we would otherwise be waiting for.
+        hostedGuardWrite(kHostedBad);
+        printf("[hosted] bring-up did not finish in %lu ms - marking co-processor "
+               "unavailable and restarting.\n",
+               (unsigned long)kHostedInitTimeoutMs);
+        fflush(stdout);
+        vTaskDelay(pdMS_TO_TICKS(50)); // let the message drain out of the console
+        esp_restart();
+    }
+
+    const bool ok = ctx.result;
+    hostedGuardWrite(ok ? kHostedGood : kHostedBad);
+    hostedWifiAvailable = ok;
+    if (!ok) printf("[hosted] co-processor bring-up failed - Wi-Fi disabled.\n");
+    return ok;
+#else
+    return launcherWifiInitHostedSdio(clk, cmd, d0, d1, d2, d3, rst);
 #endif
 }
 

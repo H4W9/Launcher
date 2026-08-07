@@ -151,6 +151,10 @@ bool ensureWifiConnected(const String &ssid, int encryptation, bool isAP) {
 ***************************************************************************************/
 void ota_function() {
 #ifndef DISABLE_OTA
+    if (!hostedWifiAvailable) {
+        displayError("ESP-Hosted unavailable: no WiFi", true);
+        return;
+    }
     RAM_LOG("ota-start");
     bool fav = false;
     bool upd = false;

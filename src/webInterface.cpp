@@ -479,6 +479,10 @@ void webUIMyNet() { startWebUi("", 0, false); }
 **  Display options to launch the WebUI
 **********************************************************************/
 void loopOptionsWebUi() {
+    if (!hostedWifiAvailable) {
+        displayError("ESP-Hosted unavailable: no WiFi", true);
+        return;
+    }
     options = {
         {"my Network", [=]() { webUIMyNet(); }                   },
         {"AP mode",    [=]() { startWebUi("Launcher", 0, true); }},

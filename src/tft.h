@@ -444,8 +444,12 @@ public:
 #include <M5GFX.h>
 #include <M5Unified.h>
 #if defined(E_PAPER_DISPLAY)
+#if defined(ARDUINO_M5STACK_PAPER)
+#define drv M5.Display
+#else
 extern M5Canvas sprite;
 #define drv sprite
+#endif
 #else
 #define drv M5.Display
 #endif
@@ -462,16 +466,25 @@ public:
     };
     inline void begin() {
 #if defined(E_PAPER_DISPLAY)
+#if defined(ARDUINO_M5STACK_PAPER)
+        // Draw directly into the IT8951 panel memory and present complete frames
+        // explicitly. Repeated full-screen M5Canvas pushes leave this hardware on
+        // its first frame with current M5GFX.
+        M5.Display.setAutoDisplay(false);
+#else
         sprite.createSprite(M5.Display.width(), M5.Display.height());
+#endif
 #endif
     };
 // E-Paper finctions
 #if defined(E_PAPER_DISPLAY)
     void display(bool a = false) {
-        sprite.pushSprite(0, 0);
 #if defined(ARDUINO_M5STACK_PAPER)
-        sprite.deleteSprite();
-        sprite.createSprite(M5.Display.width(), M5.Display.height());
+        M5.Display.waitDisplay();
+        M5.Display.display();
+        M5.Display.waitDisplay();
+#else
+        sprite.pushSprite(0, 0);
 #endif
     };
 #else
@@ -542,9 +555,13 @@ public:
 #else
 
 #include <Arduino_GFX_Library.h>
-
 #ifdef RGB_PANEL
 #define TFT_BUS_TYPE Arduino_ESP32RGBPanel
+#elif TFT_DSI_PANEL
+#include <databus/Arduino_ESP32DSIPanel.h>
+
+#include "tft_inits.h"
+#define TFT_BUS_TYPE Arduino_ESP32DSIPanel
 #else
 #define TFT_BUS_TYPE Arduino_DataBus
 #endif
@@ -585,6 +602,10 @@ public:
 #define _TFT_DRVF(a, b, c, d, e, f, g, h, i, j)                                                              \
     Arduino_RM67162(a, b, c, d, rm67162_spi_init_operations, sizeof(rm67162_spi_init_operations))
 #endif
+#elif TFT_DSI_PANEL
+#define _TFT_DRV Arduino_DSI_Display
+#define _TFT_DRVF(a, b, c, d, e, f, g, h, i, j)                                                              \
+    Arduino_DSI_Display(e, f, a, c, true, b, TFT_DSI_INIT, sizeof(TFT_DSI_INIT) / sizeof(lcd_init_cmd_t))
 #else
 // CYD Default to not shoot errors on screen
 #define _TFT_DRV Arduino_ILI9341

@@ -26,9 +26,9 @@ static constexpr gpio_num_t TAB5_KB_INT = GPIO_NUM_50;
 
 static m5::unit::UnitUnified tab5KbUnits;
 static m5::unit::UnitTab5Keyboard tab5Kb;
-static bool tab5KbAdded = false;             // Units.add() must run exactly once
-static bool tab5KbReady = false;             // true once begin() succeeds
-static volatile bool tab5KbHotplug = false;  // set by the INT ISR when kb absent
+static bool tab5KbAdded = false;            // Units.add() must run exactly once
+static bool tab5KbReady = false;            // true once begin() succeeds
+static volatile bool tab5KbHotplug = false; // set by the INT ISR when kb absent
 
 // Minimal ISR: just latch the hot-plug request; the real work happens in InputHandler().
 static void IRAM_ATTR tab5KbHotplugIsr() { tab5KbHotplug = true; }
@@ -45,8 +45,8 @@ static void tab5KbArmHotplug() {
 static bool tab5KbBegin() {
     if (!tab5KbAdded) {
         auto cfg = tab5Kb.config();
-        cfg.mode = kb::Mode::Normal;   // Normal mode exposes the bitwise per-key state
-        cfg.irq_pin = TAB5_KB_INT;     // library drains events on this INT
+        cfg.mode = kb::Mode::Normal; // Normal mode exposes the bitwise per-key state
+        cfg.irq_pin = TAB5_KB_INT;   // library drains events on this INT
         tab5Kb.config(cfg);
 
         Wire1.end();
@@ -97,14 +97,15 @@ static void tab5KbPoll() {
         if (!tab5Kb.wasPressed(kidx)) continue;
         const uint8_t row = static_cast<uint8_t>(kidx / kb::KEY_COL_COUNT);
         const uint8_t col = static_cast<uint8_t>(kidx % kb::KEY_COL_COUNT);
-        const kb::HidMapping map = tab5Kb.isSym() ? kb::keyMatrixToHidSym(row, col) : kb::keyMatrixToHidBase(row, col);
+        const kb::HidMapping map =
+            tab5Kb.isSym() ? kb::keyMatrixToHidSym(row, col) : kb::keyMatrixToHidBase(row, col);
         switch (map.keycode) {
-            case 0x50: PrevPress = true; break;  // Left  arrow
-            case 0x4F: NextPress = true; break;  // Right arrow
-            case 0x52: UpPress = true; break;    // Up    arrow
-            case 0x51: DownPress = true; break;  // Down  arrow
-            case 0x28: SelPress = true; break;   // Return / Enter
-            case 0x29: EscPress = true; break;   // Esc
+            case 0x50: PrevPress = true; break; // Left  arrow
+            case 0x4F: NextPress = true; break; // Right arrow
+            case 0x52: UpPress = true; break;   // Up    arrow
+            case 0x51: DownPress = true; break; // Down  arrow
+            case 0x28: SelPress = true; break;  // Return / Enter
+            case 0x29: EscPress = true; break;  // Esc
             default: break;
         }
         AnyKeyPress = true;
@@ -119,7 +120,9 @@ static void tab5KbPoll() {
 void _setup_gpio() {
 
     M5.begin();
-    launcherWifiInitHostedSdio(SDIO2_CLK, SDIO2_CMD, SDIO2_D0, SDIO2_D1, SDIO2_D2, SDIO2_D3, SDIO2_RST);
+    launcherWifiInitHostedSdioGuarded(
+        SDIO2_CLK, SDIO2_CMD, SDIO2_D0, SDIO2_D1, SDIO2_D2, SDIO2_D3, SDIO2_RST
+    );
     tab5KbSetup();
 }
 

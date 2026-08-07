@@ -633,6 +633,12 @@ static void handleWifiCommand(const std::vector<String> &tokens) {
         handleWifiDelCommand(tokens);
     } else if (sub.equalsIgnoreCase("clear")) {
         handleWifiClearCommand();
+    } else if (sub.equalsIgnoreCase("hosted")) {
+        // Clears the latched "co-processor is broken" verdict. Needed after
+        // flashing esp_hosted firmware onto the co-processor, otherwise the
+        // guard keeps skipping bring-up forever.
+        launcherWifiHostedResetGuard();
+        launcherConsolePrintln("OK hosted guard cleared, reboot to probe again");
     } else {
         launcherConsolePrintln("ERR unknown wifi subcommand");
     }
@@ -777,6 +783,7 @@ static void printHelp() {
     launcherConsolePrintln("  wifi add <SSID> <PWD>");
     launcherConsolePrintln("  wifi del <SSID>");
     launcherConsolePrintln("  wifi clear");
+    launcherConsolePrintln("  wifi hosted retry");
 }
 
 static void handleSerialCommand(const String &line) {

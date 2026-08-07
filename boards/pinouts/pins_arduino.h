@@ -76,4 +76,6 @@
 #include "m5stack-sticks3.h"
 #elif ARDUINO_M5STACK_DINMETER
 #include "m5stack-dinmeter.h"
+#elif CONFIG_IDF_TARGET_ESP32P4
+#include "generic_p4.h"
 #endif
