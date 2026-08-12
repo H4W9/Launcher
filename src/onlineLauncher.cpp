@@ -1203,7 +1203,15 @@ static bool __attribute__((noinline)) downloadSplitFirmware(
             dataOffset = part["flash_offset"] | 0;
         }
     }
-    if (appOffset == 0) appOffset = 0x10000;
+    if (appOffset == 0) {
+#if defined(PANCAKE)
+        // Pancake's 32MB partition table moved app0 to 0x30000 to make room for a
+        // 128KB NVS partition; see support_files/custom_pancake_32mb.csv.
+        appOffset = 0x30000;
+#else
+        appOffset = 0x10000;
+#endif
+    }
 
     const uint32_t blOffset = launcherBootloaderFlashOffset();
     const uint32_t partOffset = LAUNCHER_PARTITION_TABLE_OFFSET; // 0x8000
@@ -1393,7 +1401,13 @@ bool installExtFirmware(const String &url) {
     if (!parseContentRangeTotal(response.content_range, file_size)) return false;
 
     size_t PartitionSize = 0;
+#if defined(PANCAKE)
+    // Pancake's 32MB partition table moved app0 to 0x30000 to make room for a
+    // 128KB NVS partition; see support_files/custom_pancake_32mb.csv.
+    size_t PartitionOffset = 0x30000;
+#else
     size_t PartitionOffset = 0x10000;
+#endif
     if (buff[0] == 0xAA) {
         nb = 0;
         for (int i = 0x0; i <= 0x1A0; i += 0x20) {

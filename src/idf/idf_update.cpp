@@ -22,10 +22,21 @@ struct LauncherRequiredBootPartition {
     uint32_t size;
 };
 
+#if defined(PANCAKE)
+// Pancake (Waveshare N32R8, 32MB flash) uses an expanded 128KB NVS partition;
+// see support_files/custom_pancake_32mb.csv.
+constexpr LauncherRequiredBootPartition kRequiredBootPartitions[] = {
+    {"nvs",     0x01, 0x02, 0x9000,  0x20000},
+    {"otadata", 0x01, 0x00, 0x29000, 0x2000},
+};
+constexpr uint32_t kRequiredBootAreaEnd = 0x2B000;
+#else
 constexpr LauncherRequiredBootPartition kRequiredBootPartitions[] = {
     {"nvs",     0x01, 0x02, 0x9000, 0x5000},
     {"otadata", 0x01, 0x00, 0xE000, 0x2000},
 };
+constexpr uint32_t kRequiredBootAreaEnd = 0x10000;
+#endif
 
 struct LauncherUpdateContext {
     const esp_partition_t *partition = nullptr;
@@ -92,9 +103,8 @@ bool isRequiredBootPartitionLabel(const char *label) {
 
 bool overlapsRequiredBootPartitionArea(const LauncherPartitionEntry &entry) {
     constexpr uint32_t requiredStart = 0x9000;
-    constexpr uint32_t requiredEnd = 0x10000;
     const uint32_t entryEnd = entry.offset + entry.size;
-    return entry.offset < requiredEnd && requiredStart < entryEnd;
+    return entry.offset < kRequiredBootAreaEnd && requiredStart < entryEnd;
 }
 
 bool hasRequiredBootPartitions(const LauncherPartitionTable &table) {
