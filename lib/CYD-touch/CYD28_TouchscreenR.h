@@ -31,8 +31,12 @@
 #include "Arduino.h"
 #include <SPI.h>
 
+#ifndef CYD28_TouchR_Z_THRESH
 #define CYD28_TouchR_Z_THRESH 300
+#endif
+#ifndef CYD28_TouchR_Z_THRES_INT
 #define CYD28_TouchR_Z_THRES_INT 75
+#endif
 
 #ifndef CYD28_TouchR_IRQ
 #define CYD28_TouchR_IRQ 36

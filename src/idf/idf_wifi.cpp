@@ -1,15 +1,21 @@
 #include "idf_wifi.h"
 
+#include "idf_wifi_at.h"
 #include "ram_profile.h"
 
 #include "esp_event.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/event_groups.h"
+#include "freertos/task.h"
 #include "lwip/ip4_addr.h"
 #include "mdns.h"
+#include "nvs.h"
+#include "nvs_handle.hpp"
+#include <memory>
 #include <stdio.h>
 #include <string.h>
 
@@ -39,6 +45,8 @@ wifi_err_reason_t lastDisconnectReason = WIFI_REASON_UNSPECIFIED;
 // reconnection on a spontaneous drop. Cleared when the user explicitly stops STA.
 bool autoReconnect = false;
 esp_timer_handle_t reconnectTimer = nullptr;
+
+LauncherWifiBackend activeBackend = LauncherWifiBackend::Hosted;
 
 bool isWrongPasswordReason(wifi_err_reason_t reason) {
     return reason == WIFI_REASON_AUTH_FAIL || reason == WIFI_REASON_HANDSHAKE_TIMEOUT ||
@@ -180,6 +188,8 @@ bool staHasIpAddress() {
 }
 } // namespace
 
+extern "C" __attribute__((weak)) void launcherWifiResetSdioCoprocessor() {}
+
 bool launcherWifiStartSta() {
     if (!ensureWifiInitialized()) return false;
     esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
@@ -215,8 +225,162 @@ bool launcherWifiInitHostedSdio(
 #endif
 }
 
+bool hostedWifiAvailable = true;
+
+namespace {
+// NVS namespace/key holding the verdict from the last hosted bring-up attempt.
+constexpr const char *kHostedNs = "launcher";
+constexpr const char *kHostedKey = "hosted_st";
+
+enum HostedGuardState : uint8_t {
+    kHostedUntried = 0,
+    kHostedAttempting = 1, // written just before the call, cleared right after
+    kHostedGood = 2,
+    kHostedBad = 3,
+};
+
+// How long to give the co-processor bring-up before giving up on it. A healthy
+// one is dominated by CONFIG_ESP_HOSTED_SDIO_RESET_DELAY_MS (1500 ms) plus
+// enumeration and handshake, so this is a wide margin. A broken one otherwise
+// grinds for ~19 s and then panics: esp_hosted exposes no timeout knob and the
+// IDF libs are pre-built, so the wait cannot be shortened from the inside - but
+// we do not have to sit through it.
+constexpr uint32_t kHostedInitTimeoutMs = 8000;
+
+struct HostedInitCtx {
+    int8_t clk, cmd, d0, d1, d2, d3, rst;
+    volatile bool done;
+    volatile bool result;
+};
+
+void hostedInitTask(void *arg) {
+    auto *ctx = static_cast<HostedInitCtx *>(arg);
+    ctx->result =
+        launcherWifiInitHostedSdio(ctx->clk, ctx->cmd, ctx->d0, ctx->d1, ctx->d2, ctx->d3, ctx->rst);
+    ctx->done = true;
+    vTaskDelete(nullptr);
+}
+
+uint8_t hostedGuardRead() {
+    esp_err_t err = ESP_OK;
+    auto handle = nvs::open_nvs_handle(kHostedNs, NVS_READONLY, &err);
+    if (err != ESP_OK || !handle) return kHostedUntried;
+    uint8_t state = kHostedUntried;
+    if (handle->get_item(kHostedKey, state) != ESP_OK) return kHostedUntried;
+    return state;
+}
+
+void hostedGuardWrite(uint8_t state) {
+    esp_err_t err = ESP_OK;
+    auto handle = nvs::open_nvs_handle(kHostedNs, NVS_READWRITE, &err);
+    if (err != ESP_OK || !handle) return;
+    if (handle->set_item(kHostedKey, state) == ESP_OK) handle->commit();
+}
+} // namespace
+
+void launcherWifiHostedResetGuard() { hostedGuardWrite(kHostedUntried); }
+
+bool launcherWifiInitHostedSdioGuarded(
+    int8_t clk, int8_t cmd, int8_t d0, int8_t d1, int8_t d2, int8_t d3, int8_t rst
+) {
+#if CONFIG_ESP_HOSTED_ENABLED
+    // There is no cheap way to ask the co-processor "are you running ESP-Hosted?"
+    // before talking to it - the handshake that would tell us is the very thing
+    // that hangs. So instead of probing, we detect the damage after the fact: the
+    // flag below survives the panic, and finding it still set means the previous
+    // boot died inside the bring-up.
+    const uint8_t state = hostedGuardRead();
+    if (state == kHostedAttempting) {
+        hostedGuardWrite(kHostedBad);
+        hostedWifiAvailable = false;
+        printf(
+            "[hosted] previous bring-up crashed the device - Wi-Fi disabled.\n"
+            "[hosted] flash the esp_hosted co-processor firmware, then run "
+            "'wifi hosted retry'.\n"
+        );
+        return false;
+    }
+    if (state == kHostedBad) {
+        hostedWifiAvailable = false;
+        printf(
+            "[hosted] co-processor marked unavailable - Wi-Fi disabled. "
+            "Run 'wifi hosted retry' to probe again.\n"
+        );
+        return false;
+    }
+
+    hostedGuardWrite(kHostedAttempting);
+
+    // Run the bring-up on its own task so a stuck co-processor cannot hold the
+    // boot hostage. Static because the task keeps referencing it if we time out.
+    static HostedInitCtx ctx;
+    ctx = {clk, cmd, d0, d1, d2, d3, rst, false, false};
+    // The hosted stack nests SDIO + RPC, so it needs a roomy stack.
+    if (xTaskCreate(hostedInitTask, "hosted_init", 8192, &ctx, 5, nullptr) != pdPASS) {
+        hostedGuardWrite(kHostedBad);
+        hostedWifiAvailable = false;
+        printf("[hosted] could not start bring-up task - Wi-Fi disabled.\n");
+        return false;
+    }
+
+    const int64_t deadlineUs = esp_timer_get_time() + (int64_t)kHostedInitTimeoutMs * 1000;
+    while (!ctx.done && esp_timer_get_time() < deadlineUs) { vTaskDelay(pdMS_TO_TICKS(20)); }
+
+    if (!ctx.done) {
+        // The task is wedged somewhere in SDIO and cannot be safely killed, and
+        // letting it run on risks it panicking later at an arbitrary point. Bank
+        // the verdict and restart now - deliberately, and roughly 10 s sooner
+        // than the crash we would otherwise be waiting for.
+        hostedGuardWrite(kHostedBad);
+        printf(
+            "[hosted] bring-up did not finish in %lu ms - marking co-processor "
+            "unavailable and restarting.\n",
+            (unsigned long)kHostedInitTimeoutMs
+        );
+        fflush(stdout);
+        vTaskDelay(pdMS_TO_TICKS(50)); // let the message drain out of the console
+        esp_restart();
+    }
+
+    const bool ok = ctx.result;
+    hostedGuardWrite(ok ? kHostedGood : kHostedBad);
+    hostedWifiAvailable = ok;
+    if (!ok) printf("[hosted] co-processor bring-up failed - Wi-Fi disabled.\n");
+    return ok;
+#else
+    return launcherWifiInitHostedSdio(clk, cmd, d0, d1, d2, d3, rst);
+#endif
+}
+
+LauncherWifiBackend launcherWifiActiveBackend() { return activeBackend; }
+
+bool launcherWifiInitSdioAuto(
+    int8_t clk, int8_t cmd, int8_t d0, int8_t d1, int8_t d2, int8_t d3, int8_t rst
+) {
+    activeBackend = LauncherWifiBackend::Hosted;
+#if defined(ENABLE_ESP_AT_INTERFACE)
+    launcherWifiResetSdioCoprocessor();
+    if (launcherWifiAtInit(clk, cmd, d0, d1, d2, d3)) {
+        activeBackend = LauncherWifiBackend::EspAt;
+        hostedWifiAvailable = true; // "Wi-Fi is available", regardless of transport
+        return true;
+    }
+#endif
+
+    activeBackend = LauncherWifiBackend::Hosted;
+    launcherWifiResetSdioCoprocessor();
+    if (launcherWifiInitHostedSdioGuarded(clk, cmd, d0, d1, d2, d3, rst)) return true;
+    printf("[wifi] ESP-Hosted unavailable, trying ESP-AT co-processor firmware instead\n");
+    return false;
+}
+
 LauncherWifiConnectState
 launcherWifiConnectStatus(const char *ssid, const char *password, uint32_t timeout_ms) {
+#if defined(ENABLE_ESP_AT_INTERFACE)
+    if (activeBackend == LauncherWifiBackend::EspAt) {
+        return launcherWifiAtConnectStatus(ssid, password, timeout_ms);
+    }
+#endif
     if (!launcherWifiStartSta()) return LauncherWifiConnectState::Failed;
 
     // Only (re-)initiate if not already waiting for this SSID to connect.
@@ -279,6 +443,9 @@ bool launcherWifiConnect(const char *ssid, const char *password, uint32_t timeou
 }
 
 int launcherWifiScan(std::vector<LauncherWifiAp> &out) {
+#if defined(ENABLE_ESP_AT_INTERFACE)
+    if (activeBackend == LauncherWifiBackend::EspAt) return launcherWifiAtScan(out);
+#endif
     out.clear();
     if (!launcherWifiStartSta()) return -1;
 
@@ -308,6 +475,12 @@ int launcherWifiScan(std::vector<LauncherWifiAp> &out) {
 }
 
 bool launcherWifiStartAp(const char *ssid, const char *password, uint8_t channel, uint8_t max_clients) {
+#if defined(ENABLE_ESP_AT_INTERFACE)
+    if (activeBackend == LauncherWifiBackend::EspAt) {
+        printf("[wifi] AP mode not available: co-processor is running ESP-AT firmware\n");
+        return false;
+    }
+#endif
     if (!ensureWifiInitialized()) return false;
 
     esp_netif_ip_info_t ipInfo = {};
@@ -336,6 +509,9 @@ bool launcherWifiStartAp(const char *ssid, const char *password, uint8_t channel
 }
 
 bool launcherWifiStop() {
+#if defined(ENABLE_ESP_AT_INTERFACE)
+    if (activeBackend == LauncherWifiBackend::EspAt) return launcherWifiAtDisconnect();
+#endif
     if (!wifiInitialized) return true;
     expectingConnection = false;
     autoReconnect = false; // explicit stop: do not auto-reconnect in the background
@@ -349,16 +525,32 @@ bool launcherWifiStop() {
 }
 
 bool launcherWifiIsConnected() {
+#if defined(ENABLE_ESP_AT_INTERFACE)
+    if (activeBackend == LauncherWifiBackend::EspAt) return launcherWifiAtIsConnected();
+#endif
     if (!wifiEvents) return false;
     if ((xEventGroupGetBits(wifiEvents) & WIFI_CONNECTED_BIT) == 0) return false;
     return staHasIpAddress();
 }
 
-std::string launcherWifiLocalIp() { return ipFromNetif(staNetif); }
+std::string launcherWifiLocalIp() {
+#if defined(ENABLE_ESP_AT_INTERFACE)
+    if (activeBackend == LauncherWifiBackend::EspAt) return launcherWifiAtLocalIp();
+#endif
+    return ipFromNetif(staNetif);
+}
 
-std::string launcherWifiApIp() { return ipFromNetif(apNetif); }
+std::string launcherWifiApIp() {
+#if defined(ENABLE_ESP_AT_INTERFACE)
+    if (activeBackend == LauncherWifiBackend::EspAt) return ""; // AP mode not supported over AT
+#endif
+    return ipFromNetif(apNetif);
+}
 
 std::string launcherWifiMac() {
+#if defined(ENABLE_ESP_AT_INTERFACE)
+    if (activeBackend == LauncherWifiBackend::EspAt) return launcherWifiAtMac();
+#endif
     if (!ensureWifiInitialized()) return "";
     uint8_t mac[6] = {};
     if (esp_wifi_get_mac(WIFI_IF_STA, mac) != ESP_OK) esp_read_mac(mac, ESP_MAC_WIFI_STA);
@@ -370,6 +562,12 @@ std::string launcherWifiMac() {
 }
 
 bool launcherMdnsStart(const char *host, uint16_t port) {
+#if defined(ENABLE_ESP_AT_INTERFACE)
+    if (activeBackend == LauncherWifiBackend::EspAt) {
+        printf("[wifi] mDNS not available: co-processor is running ESP-AT firmware\n");
+        return false;
+    }
+#endif
     if (mdnsStarted) mdns_free();
     if (mdns_init() != ESP_OK) return false;
     mdnsStarted = true;
@@ -380,6 +578,9 @@ bool launcherMdnsStart(const char *host, uint16_t port) {
 }
 
 void launcherMdnsStop() {
+#if defined(ENABLE_ESP_AT_INTERFACE)
+    if (activeBackend == LauncherWifiBackend::EspAt) return;
+#endif
     if (!mdnsStarted) return;
     mdns_free();
     mdnsStarted = false;

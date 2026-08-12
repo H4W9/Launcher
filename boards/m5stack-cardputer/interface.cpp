@@ -413,3 +413,16 @@ void InputHandler(void) {
         // launcherConsolePrintf("%s\n", String(keyStr).c_str());
     }
 }
+
+void reboot() {
+    launcherConsolePrintf("%s", String("\r\n").c_str());
+    launcherConsoleFlush();
+    launcherConsoleEnd();
+    vTaskDelay(pdMS_TO_TICKS(50));
+    launcherGpioInput(1);
+    launcherGpioInput(2);
+    launcherGpioInput(13);
+    launcherGpioInput(15);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    ESP.restart();
+}

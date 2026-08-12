@@ -2,6 +2,8 @@
 
 #include "ca_certs.h"
 #include "esp_http_client.h"
+#include "idf_wifi.h"
+#include "idf_wifi_at.h"
 #include "launcher_platform.h"
 #include <cstdlib>
 #include <cstring>
@@ -119,6 +121,14 @@ bool launcherHttpGetStream(
     const char *url, LauncherHttpChunkCb cb, void *ctx, LauncherHttpResponse *response, const char *headerKey,
     const char *headerValue
 ) {
+#if defined(ENABLE_ESP_AT_INTERFACE)
+    if (launcherWifiActiveBackend() == LauncherWifiBackend::EspAt) {
+        if ((headerKey && headerValue) || (url && (strstr(url, "/download?") || strstr(url, "/proxy?")))) {
+            return launcherWifiAtHttpGetStreamRaw(url, cb, ctx, response, headerKey, headerValue);
+        }
+        return launcherWifiAtHttpGet(url, cb, ctx, response, 0, 0, headerKey, headerValue);
+    }
+#endif
     return executeGet(url, cb, ctx, response, headerKey, headerValue);
 }
 
@@ -126,14 +136,24 @@ bool launcherHttpGetRange(
     const char *url, uint32_t offset, uint32_t size, LauncherHttpChunkCb cb, void *ctx,
     LauncherHttpResponse *response, const char *hwid
 ) {
+#if defined(ENABLE_ESP_AT_INTERFACE)
+    if (launcherWifiActiveBackend() == LauncherWifiBackend::EspAt) {
+        return launcherWifiAtHttpGet(url, cb, ctx, response, offset, size, "HWID", hwid);
+    }
+#endif
     String range = "bytes=" + String(offset) + "-" + String(offset + size - 1);
-    return executeGet(url, cb, ctx, response, "Range", range.c_str(), "HWID", hwid);
+    return executeGet(url, cb, ctx, response, "Range", range.c_str(), "HWID", "aa:11:bb:22:cc:44" /*hwid*/);
 }
 
 bool launcherHttpPost(
     const char *url, const char *body, size_t bodyLen, String &out, size_t maxSize,
     LauncherHttpResponse *response
 ) {
+#if defined(ENABLE_ESP_AT_INTERFACE)
+    if (launcherWifiActiveBackend() == LauncherWifiBackend::EspAt) {
+        return launcherWifiAtHttpPost(url, body, bodyLen, out, maxSize, response);
+    }
+#endif
     out = "";
     StringSink sink = {&out, maxSize};
     LauncherHttpResponse localResponse;

@@ -73,6 +73,13 @@ Arduino_ESP32RGBPanel *bus = new Arduino_ESP32RGBPanel(
 );
 #elif defined(TFT_QSPI)
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(TFT_CS, TFT_SCLK, TFT_D0, TFT_D1, TFT_D2, TFT_D3);
+#elif defined(TFT_DSI_PANEL)
+Arduino_ESP32DSIPanel *bus = new Arduino_ESP32DSIPanel(
+    TFT_HSYNC_PULSE_WIDTH /* hsync_pulse_width */, TFT_HSYNC_BACK_PORCH /* hsync_back_porch */,
+    TFT_HSYNC_FRONT_PORCH /* hsync_front_porch */, TFT_VSYNC_PULSE_WIDTH /* vsync_pulse_width */,
+    TFT_VSYNC_BACK_PORCH /*vsync_back_porch  */, TFT_VSYNC_FRONT_PORCH /* vsync_front_porch */,
+    TFT_PREF_SPEED /* prefer_speed */
+);
 #else // SPI Data Bus shared with SDCard and other SPIClass devices
 Arduino_DataBus *bus = new Arduino_HWSPI(TFT_DC, TFT_CS, TFT_SCLK, TFT_MOSI, TFT_MISO, &SPI);
 #endif
@@ -118,6 +125,12 @@ void displayScrollingText(const String &text, Opt_Coord &coord) {
         if (i == 1) _lastmillis = launcherMillis() + 1000;
         tft->display(false);
     }
+}
+
+static inline void drawOptionsErase(const Opt_Coord &coord) {
+    if (coord.boxW == 0 || coord.boxH == 0) return;
+    tft->fillRect(coord.boxX, coord.boxY, coord.boxW, coord.boxH, coord.bgcolor);
+    tft->display(false);
 }
 
 /***************************************************************************************
@@ -682,6 +695,10 @@ Opt_Coord drawOptions(
         boxY = 2;
         contentHeight = tftHeight - 4;
     }
+    coord.boxX = boxX;
+    coord.boxY = boxY;
+    coord.boxW = contentWidth;
+    coord.boxH = contentHeight;
 
     bool firstItemSelected = (optionCount > 0 && index == start);
     tft->setTextSize(FM);
@@ -972,7 +989,7 @@ int drawBootAppShortcuts(std::vector<MenuOptions> &opt) {
 
     if (size < 1) return 0;
 
-#if defined(USE_CARDKB2)
+#if defined(USE_CARDKB2) && !defined(HAS_TOUCH)
     if (!CardKB2Installed) return 0;
 #endif
 
@@ -1030,20 +1047,20 @@ void drawWifiStatus(bool hasBattery) {
     int cx = batteryLeft - gap - 3 * u;
     int by = 7 + (FP * LH + 9) / 2 + u;
     int dot = u < 2 ? 2 : u;
-    tft->fillRect(cx - 3 * u - 1, by - 4 * u - 1, 6 * u + 3, 4 * u + dot + 2, BGCOLOR);
     if (!launcherWifiIsConnected()) return;
+    tft->fillRect(cx - 3 * u - 1, 6, 6 * u + 3, 4 * u + dot + 2, BGCOLOR);
     int thick = size / 8;
     if (thick < 1) thick = 1;
     for (int k = 1; k <= 3; ++k) {
         int hw = k * u;
-        int apexY = by - k * u - u;
+        int apexY = by - k * u - u + 2;
         int drop = u;
         for (int t = 0; t < thick; ++t) {
             tft->drawLine(cx - hw, apexY + drop + t, cx, apexY + t, FGCOLOR);
             tft->drawLine(cx, apexY + t, cx + hw, apexY + drop + t, FGCOLOR);
         }
     }
-    tft->fillRect(cx - dot / 2, by - dot / 2, dot, dot, FGCOLOR);
+    tft->fillRect(cx - dot / 2, by - dot / 2 + 2, dot, dot, FGCOLOR);
 }
 
 void drawBatteryStatus(uint8_t bat) {
@@ -1189,19 +1206,12 @@ int loopOptions(std::vector<Option> &options, bool bright, uint16_t al, uint16_t
 
         /* Select and run function */
         if (check(SelPress)) {
+            drawOptionsErase(coord);
             options[index].operation();
             break;
         }
 
 #if defined(HAS_TOUCH)
-        // Full-screen list menus (border == false) draw their own explicit
-        // [ESC] label as the back target. The global top-left heat-map ESC zone
-        // (utils.cpp touchHeatMap: x < tftWidth/3 && y < 50) overlaps the first
-        // list rows on tall screens, and because check(EscPress) both polls the
-        // touch controller and consumes the flag, honouring it here makes the
-        // first couple of items impossible to select (they exit to the menu).
-        // So ignore the heat-map ESC for these menus; the [ESC] label still
-        // exits. Bordered pop-ups (no [ESC] label) keep the corner gesture.
         if (border == false) {
             if (escRequested || returnToMenu || exit) return -1;
             EscPress = false; // swallow any stray heat-map ESC over the list rows
@@ -1212,7 +1222,7 @@ int loopOptions(std::vector<Option> &options, bool bright, uint16_t al, uint16_t
         if (check(EscPress) || returnToMenu || exit) return -1;
 #endif
     }
-    if (border) tft->fillScreen(BGCOLOR);
+    // if (border) tft->fillScreen(BGCOLOR);
 #if defined(HAS_TOUCH)
     TouchFooter(FGCOLOR);
 #endif

@@ -32,7 +32,24 @@ bool s_usbMounted = false;
 constexpr uint8_t kUsbItfMsc = 0;
 constexpr uint8_t kUsbEpOut = 0x01;
 constexpr uint8_t kUsbEpIn = 0x81;
+
+// The ESP32-P4 has two OTG controllers, and TinyUSB maps them as rhport 0 = the full-speed
+// one (which shares the two FSLS PHYs with USB_SERIAL_JTAG) and rhport 1 = the high-speed
+// one (which has its own dedicated UTMI PHY). Which controller reaches the board's device
+// connector is a property of the board, not of the chip:
+//
+//   m5stack-tab5         USB-C wired to FSLS PHY0        -> full speed, rhport 0
+//   lilygo-t-display-p4  USB-C silkscreened "High Speed" -> high speed, rhport 1
+//
+// Boards on the high-speed port define USB_MSC_HIGH_SPEED. Everything below keys off that,
+// so the full-speed path stays exactly as it was.
+#if defined(USB_MSC_HIGH_SPEED)
+constexpr uint8_t kUsbRhPort = 1;
+constexpr uint16_t kUsbEpSize = 512; // high-speed bulk endpoints must be 512 bytes
+#else
+constexpr uint8_t kUsbRhPort = 0;
 constexpr uint16_t kUsbEpSize = 64;
+#endif
 
 constexpr tusb_desc_device_t kDeviceDescriptor = {
     sizeof(tusb_desc_device_t),
@@ -67,7 +84,9 @@ const char *kUsbStrings[] = {
 };
 
 void resetUsbDevicePeripheral() {
-#if CONFIG_IDF_TARGET_ESP32P4
+#if CONFIG_IDF_TARGET_ESP32P4 && !defined(USB_MSC_HIGH_SPEED)
+    // USB_WRAP is the full-speed controller's wrapper; the high-speed controller is a
+    // separate peripheral and is reset by usb_new_phy()/usb_del_phy() instead.
     PERIPH_RCC_ATOMIC() { _usb_wrap_ll_reset_register(); }
 #elif CONFIG_IDF_TARGET_ESP32S2 || CONFIG_IDF_TARGET_ESP32S3
     REG_CLR_BIT(RTC_CNTL_USB_CONF_REG, RTC_CNTL_IO_MUX_RESET_DISABLE);
@@ -91,7 +110,9 @@ void usbDeviceTask(void *param) {
 }
 
 void restoreUsbSerial() {
-#if CONFIG_IDF_TARGET_ESP32P4
+// Only the full-speed path steals the pads from USB_SERIAL_JTAG, so only it has to hand
+// them back. On a high-speed board the console never moved.
+#if CONFIG_IDF_TARGET_ESP32P4 && !defined(USB_MSC_HIGH_SPEED)
     PERIPH_RCC_ATOMIC() { _usb_wrap_ll_enable_bus_clock(false); }
     usb_wrap_ll_phy_enable_pad(&USB_WRAP, false);
     PERIPH_RCC_ATOMIC() {
@@ -113,7 +134,7 @@ void restoreUsbSerial() {
 bool beginUsbRaw() {
     if (s_usbStarted) return true;
 
-#if CONFIG_IDF_TARGET_ESP32P4
+#if CONFIG_IDF_TARGET_ESP32P4 && !defined(USB_MSC_HIGH_SPEED)
     PERIPH_RCC_ATOMIC() {
         _usb_serial_jtag_ll_enable_bus_clock(false);
         _usb_wrap_ll_enable_bus_clock(true);
@@ -125,9 +146,15 @@ bool beginUsbRaw() {
     static const usb_phy_otg_io_conf_t otgIoConf = USB_PHY_SELF_POWERED_DEVICE(-1);
     usb_phy_config_t phyConfig = {
         .controller = USB_PHY_CTRL_OTG,
+#if defined(USB_MSC_HIGH_SPEED)
+        .target = USB_PHY_TARGET_UTMI, // dedicated high-speed PHY, fixed pads
+        .otg_mode = USB_OTG_MODE_DEVICE,
+        .otg_speed = USB_PHY_SPEED_HIGH,
+#else
         .target = USB_PHY_TARGET_INT,
         .otg_mode = USB_OTG_MODE_DEVICE,
         .otg_speed = USB_PHY_SPEED_FULL,
+#endif
         .ext_io_conf = nullptr,
         .otg_io_conf = &otgIoConf,
     };
@@ -135,8 +162,8 @@ bool beginUsbRaw() {
 
     tusb_rhport_init_t tinit = {};
     tinit.role = TUSB_ROLE_DEVICE;
-    tinit.speed = TUSB_SPEED_FULL;
-    if (!tusb_init(0, &tinit)) return false;
+    tinit.speed = (kUsbEpSize == 512) ? TUSB_SPEED_HIGH : TUSB_SPEED_FULL;
+    if (!tusb_init(kUsbRhPort, &tinit)) return false;
     tud_connect();
 
     xTaskCreate(usbDeviceTask, "usb_msc", 4096, nullptr, configMAX_PRIORITIES - 1, &s_usbDeviceTask);
@@ -277,8 +304,16 @@ void MassStorage::loop() {
 void MassStorage::beginUsb() {
     drawUSBStickIcon(false);
     Serial.flush();
+#if ARDUINO_USB_CDC_ON_BOOT
+    // Serial is the USB CDC that is about to lose its PHY, so it has to be shut down first.
+    // Where Serial is a plain UART (a board with a separate USB-UART bridge) closing it would
+    // only kill the console for no reason - USB never touches those pins.
     Serial.end();
-#if CONFIG_IDF_TARGET_ESP32P4
+#endif
+#if CONFIG_IDF_TARGET_ESP32P4 && !defined(USB_MSC_HIGH_SPEED)
+    // Full-speed path only: hand FSLS PHY0 over from USB_SERIAL_JTAG to USB_WRAP. The
+    // high-speed controller has its own UTMI PHY and shares nothing, so there is nothing
+    // to steal and nothing to restore.
     usb_serial_jtag_ll_phy_enable_pad(false);
     LP_SYS.usb_ctrl.sw_hw_usb_phy_sel = 1;
     LP_SYS.usb_ctrl.sw_usb_phy_sel = 1; // USB_WRAP -> FSLS PHY0 (GPIO24/25 on Tab5 USB-C)

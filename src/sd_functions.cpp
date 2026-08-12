@@ -31,15 +31,25 @@ static inline void resumeSdInstallInput() {
 }
 
 bool setupSdCard() {
-#if !defined(SDM_SD) // fot Lilygo T-Display S3 with lilygo shield
+#if defined(ARDUINO_M5STACK_PAPER)
+    // M5GFX and the SD slot share VSPI on the original M5Paper. Use Arduino's
+    // canonical VSPI instance so both libraries coordinate the same hardware
+    // bus instead of creating a second SPIClass owner for it.
+    if (!SDM.begin(_cs, SPI))
+#elif !defined(SDM_SD) 
+    if (sdcardMounted) return true;
+    bool OnebitMode = true; // default to one bit mode
 #if defined(USE_SD_MMC) && defined(PIN_SD_CLK) && defined(PIN_SD_CMD) && defined(PIN_SD_D0)
-    SD_MMC.end();
-    vTaskDelay(pdTICKS_TO_MS(20));
+#if defined(SD_MMC_4BIT) && defined(PIN_SD_D1) && defined(PIN_SD_D2) && defined(PIN_SD_D3)
+    SD_MMC.setPins(PIN_SD_CLK, PIN_SD_CMD, PIN_SD_D0, PIN_SD_D1, PIN_SD_D2, PIN_SD_D3);
+    OnebitMode = false;
+#else
     SD_MMC.setPins(PIN_SD_CLK, PIN_SD_CMD, PIN_SD_D0);
+#endif
     vTaskDelay(pdTICKS_TO_MS(10));
 #else
 #endif
-    if (!SD_MMC.begin("/sdcard", true, false)) // One bit mode, don't auto-format
+    if (!SD_MMC.begin("/sdcard", OnebitMode, false)) // One bit mode, don't auto-format
 #elif (TFT_MOSI == SDCARD_MOSI)
     if (!SDM.begin(_cs)) // https://github.com/Bodmer/TFT_eSPI/discussions/2420
 #elif defined(HEADLESS)
@@ -498,9 +508,23 @@ static String installedAppNameFromPath(const String &path) { return launcherInst
 static bool flashRawFromSd(
     File &file, uint32_t sourceOffset, size_t imageSize, const LauncherPartitionEntry &target, bool appImage
 ) {
-    if (!file.seek(sourceOffset)) return false;
+    if (!file.seek(sourceOffset)) {
+        launcherConsolePrintf(
+            "flashRawFromSd: initial seek to 0x%08X failed, retrying\n", (unsigned)sourceOffset
+        );
+        return false;
+    }
     progressHandler(0, imageSize);
-    if (!launcherRawUpdateBegin(target.offset, target.size, imageSize, appImage)) return false;
+    if (!launcherRawUpdateBegin(target.offset, target.size, imageSize, appImage)) {
+        launcherConsolePrintf(
+            "flashRawFromSd: launcherRawUpdateBegin failed target=0x%08X/0x%08X image=0x%08X (%s)\n",
+            (unsigned)target.offset,
+            (unsigned)target.size,
+            (unsigned)imageSize,
+            launcherUpdateLastErrorName()
+        );
+        return false;
+    }
 
     constexpr size_t bufferSize = 4096;
     std::unique_ptr<uint8_t[]> buf(new (std::nothrow) uint8_t[bufferSize]);
@@ -542,7 +566,12 @@ static bool flashRawFromSd(
         progressHandler(written, imageSize);
         launcherDelayMs(1);
     }
-    if (!launcherRawUpdateEnd()) return false;
+    if (!launcherRawUpdateEnd()) {
+        launcherConsolePrintf(
+            "flashRawFromSd: launcherRawUpdateEnd failed (%s)\n", launcherUpdateLastErrorName()
+        );
+        return false;
+    }
 
     if (!appImage) {
         String patchError;

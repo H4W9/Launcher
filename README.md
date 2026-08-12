@@ -101,6 +101,9 @@ Things that need to be done in future updates
 ## Latest Changelog
 * 2.8.1:
      * [x] Removed `phy_init` partition and increased NVS to 0x5000
+     * [x] Port to [T-Display P4](https://lilygo.cc/products/t-display-p4?bg_ref=sDI8Bh4HmO)
+     * [x] Port to [T-Display C5](https://lilygo.cc/products/t-display-c5?bg_ref=sDI8Bh4HmO)
+
 
 * 2.8.0:
      * [x] Port to Xueersi-XiaoMiao

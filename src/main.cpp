@@ -9,7 +9,7 @@
 #include "idf/idf_wifi.h"
 #include "idf/launcher_platform.h"
 #include "nvs_flash.h"
-#if CONFIG_IDF_TARGET_ESP32P4
+#if ARDUINO_M5STACK_TAB5
 #include "nvs.h"
 #include "nvs_handle.hpp"
 #endif
@@ -74,11 +74,21 @@ volatile uint16_t tftHeight = TFT_WIDTH;
 #endif
 volatile uint16_t tftWidth = TFT_HEIGHT;
 TaskHandle_t xHandle;
+// Defined in mykeyboard.cpp; declared here because this task is compiled before that header
+// is included below.
+void launcherInputLockInit();
+void launcherInputLock();
+void launcherInputUnlock();
+
 void __attribute__((weak)) taskInputHandler(void *parameter) {
     auto timer = launcherMillis();
     while (true) {
         checkPowerSaveTime();
         if (!AnyKeyPress || launcherMillis() - timer > 75) {
+            // Held across the whole update so _getKeyPress() can never observe (or copy) a
+            // half-written KeyStroke. It replaces the old vTaskSuspend() scheme, which could
+            // freeze this task inside the allocator and deadlock loopTask - see mykeyboard.h.
+            launcherInputLock();
             resetGlobals();
 #ifndef DONT_USE_INPUT_TASK
             InputHandler();
@@ -86,6 +96,7 @@ void __attribute__((weak)) taskInputHandler(void *parameter) {
             cardkb2_poll();
 #endif
 #endif
+            launcherInputUnlock();
             timer = launcherMillis();
         }
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -154,6 +165,13 @@ void _post_setup_gpio() __attribute__((weak));
 void _post_setup_gpio() {}
 
 /*********************************************************************
+**  Function: _late_setup_gpio()
+**  Sets up a weak (empty) function to be replaced by /ports/* /interface.h
+*********************************************************************/
+void _late_setup_gpio() __attribute__((weak));
+void _late_setup_gpio() {}
+
+/*********************************************************************
 **  Function: setup
 **  Where the devices are started and variables set
 *********************************************************************/
@@ -169,7 +187,7 @@ void setup() {
     ensureM5StackUiFlowNVSDefaults();
     RAM_LOG("after-nvs-partition-defaults");
 
-#if CONFIG_IDF_TARGET_ESP32P4
+#if ARDUINO_M5STACK_TAB5
     esp_err_t nve;
     std::unique_ptr<nvs::NVSHandle> nvsHandle = nvs::open_nvs_handle("launcher", NVS_READWRITE, &nve);
     bool init = false;
@@ -244,10 +262,6 @@ void setup() {
     partitionCrawler();
     RAM_LOG("after-partitionCrawler");
 
-#if defined(USE_CARDKB2) && defined(CARDKB2_SDA) && defined(CARDKB2_SCL)
-    cardkb2_setup(CARDKB2_SDA, CARDKB2_SCL);
-#endif
-
     // Init post setup GPIO before SD Card initializes
     _post_setup_gpio();
 
@@ -263,6 +277,9 @@ void setup() {
 
     // Some boards need input polling to stay on the main loop thread because
     // display/touch drivers are not safe to service from a helper task.
+    // Must exist before either side can take it; setup() is still single threaded here.
+    // Created unconditionally: _getKeyPress() is reachable even in DONT_USE_INPUT_TASK builds.
+    launcherInputLockInit();
 #ifndef DONT_USE_INPUT_TASK
     xTaskCreate(
         taskInputHandler, // Task function
@@ -297,6 +314,15 @@ void setup() {
 #if defined(HAS_KEYBOARD) || defined(USE_CARDKB2)
     std::vector<LauncherAppMetadata> bootApps = launcherListInstalledApps();
 #endif
+
+#if defined(USE_CARDKB2) && defined(CARDKB2_SDA) && defined(CARDKB2_SCL)
+    if (sdcardMounted) launcherDelayMs(300);
+    else launcherDelayMs(100);
+    cardkb2_setup(CARDKB2_SDA, CARDKB2_SCL);
+#endif
+
+    // Init any device specific hardware after TFT+SD+CardKb
+    _late_setup_gpio();
 
     while (launcherMillis() < i + (2000 + bootToApp * 3000)) { // increased from 2500 to 5000
         initDisplay();                                         // Inicia o display
@@ -512,6 +538,7 @@ void loop() {
             if (!dev_mode && pass_by == 5) {
                 displayMsg("Dev mode Activated");
                 dev_mode = true;
+                saveConfigs();
             }
             drawMainMenu(menuItems, index);
 #if defined(HAS_TOUCH)

@@ -15,6 +15,7 @@
 #include "sd_functions.h"
 #include "settings.h"
 #include "utils.h"
+#include <algorithm>
 #include <esp_ota_ops.h>
 #include <globals.h>
 
@@ -122,6 +123,19 @@ bool connectWifi() {
     std::vector<LauncherWifiAp> networks;
     int nets = launcherWifiScan(networks);
     // Serial.printf("connectWifi: scan returned %d networks\n", nets);
+    if (nets < 0) {
+        displayError("WiFi scan failed");
+        return false;
+    }
+    for (int i = 0; i < nets; i++) {
+        String networkSsid = networks[i].ssid.c_str();
+        if (networkSsid.isEmpty()) continue;
+        String knownPwd;
+        if (!getWifiCredential(networkSsid, knownPwd)) continue;
+        launcherConsolePrintf("Auto-connecting to saved SSID: %s\n", networkSsid.c_str());
+        if (wifiConnect(networkSsid, static_cast<int>(networks[i].authmode))) return true;
+        if (returnToMenu) return false;
+    }
     options = {};
     for (int i = 0; i < nets; i++) {
         String networkSsid = networks[i].ssid.c_str();
@@ -151,6 +165,10 @@ bool ensureWifiConnected(const String &ssid, int encryptation, bool isAP) {
 ***************************************************************************************/
 void ota_function() {
 #ifndef DISABLE_OTA
+    if (!hostedWifiAvailable) {
+        displayError("ESP-Hosted unavailable: no WiFi", true);
+        return;
+    }
     RAM_LOG("ota-start");
     bool fav = false;
     bool upd = false;
@@ -300,8 +318,10 @@ bool getRemoteFileSize(const String &url, size_t &size, const char *hwid = nullp
         // A redirect the device can't follow is api.launcherhub.net's answer, not a
         // hiccup on the CDN side; fall back to /proxy (server-side fetch) once
         // instead of failing the whole install before it even starts.
-        const bool unfollowedRedirect = response.status >= 300 && response.status < 400;
-        if (attempt == 0 && unfollowedRedirect && activeUrl.indexOf("/download?") >= 0) {
+        const bool shouldTryProxy =
+            activeUrl.indexOf("/download?") >= 0 &&
+            (response.status == 0 || (response.status >= 300 && response.status < 400));
+        if (attempt == 0 && shouldTryProxy) {
             activeUrl.replace("/download?", "/proxy?");
             launcherConsolePrintf("Redirect not followed, falling back to /proxy for size probe\n");
             continue;
@@ -322,6 +342,8 @@ struct FileDownloadContext {
 bool fileDownloadCb(const uint8_t *data, size_t len, void *ctx) {
     FileDownloadContext *download = static_cast<FileDownloadContext *>(ctx);
     if (!download || !download->file) return false;
+
+    if (download->downloaded == 0) RAM_LOG("fileDownloadCb-first-chunk");
 
     // On the first chunk, content_length is already populated by fetch_headers.
     // Use it to initialize the progress bar with the real file size.
@@ -358,6 +380,7 @@ bool fileDownloadCb(const uint8_t *data, size_t len, void *ctx) {
             download->file->flush();
             vTaskDelay(pdMS_TO_TICKS(2));
             progressHandler(download->downloaded, download->expected);
+            RAM_LOG("fileDownloadCb-progress");
             vTaskDelay(pdMS_TO_TICKS(2));
             download->progressTick = 0;
         } else {
@@ -370,6 +393,7 @@ bool fileDownloadCb(const uint8_t *data, size_t len, void *ctx) {
 struct RawHttpUpdateContext {
     uint32_t address;
     size_t partitionSize;
+    size_t skipRemaining;
     size_t expected;
     size_t written;
     bool appImage;
@@ -379,6 +403,13 @@ struct RawHttpUpdateContext {
 bool launcherRawUpdateHttpCb(const uint8_t *data, size_t len, void *ctx) {
     RawHttpUpdateContext *updateCtx = static_cast<RawHttpUpdateContext *>(ctx);
     if (!updateCtx) return false;
+    if (updateCtx->skipRemaining > 0) {
+        const size_t skip = min(len, updateCtx->skipRemaining);
+        data += skip;
+        len -= skip;
+        updateCtx->skipRemaining -= skip;
+        if (len == 0) return true;
+    }
     if (!updateCtx->started) {
         if (!launcherRawUpdateBegin(
                 updateCtx->address, updateCtx->partitionSize, updateCtx->expected, updateCtx->appImage
@@ -404,57 +435,10 @@ bool flashRawRangeFromHttp(
     bool appImage, const char *hwid = nullptr, String *errorOut = nullptr
 ) {
     pauseInputHandlerTask();
-    RawHttpUpdateContext update = {target.offset, target.size, imageSize, 0, appImage, false};
-    bool httpOk = false;
+    RawHttpUpdateContext update = {target.offset, target.size, sourceOffset, imageSize, 0, appImage, false};
     LauncherHttpResponse response;
-    String activeUrl = url;
-    bool triedProxyFallback = false;
-    constexpr uint8_t maxAttempts = 24;
-    for (uint8_t attempt = 0; update.written < imageSize && attempt < maxAttempts; ++attempt) {
-        size_t before = update.written;
-        const uint32_t requestOffset = sourceOffset + update.written;
-        const size_t remaining = imageSize - update.written;
-        response = LauncherHttpResponse();
-        RAM_LOG("flashRawRangeFromHttp-attempt");
-        httpOk = launcherHttpGetRange(
-            activeUrl.c_str(), requestOffset, remaining, launcherRawUpdateHttpCb, &update, &response, hwid
-        );
-        if (!httpOk) {
-            launcherConsolePrintf(
-                "HTTP range fetch failed offset=%u remaining=%u written=%u/%u status=%d transport_err=%d\n",
-                requestOffset,
-                static_cast<unsigned>(remaining),
-                static_cast<unsigned>(update.written),
-                static_cast<unsigned>(imageSize),
-                response.status,
-                response.transport_error
-            );
-        }
-        if (httpOk && update.written == imageSize) break;
-        if (update.written == before) {
-            const bool unfollowedRedirect = response.status >= 300 && response.status < 400;
-            if (unfollowedRedirect) {
-                // A redirect the device can't follow is api.launcherhub.net's answer,
-                // not a transient hiccup on the CDN side: /download sends the same
-                // Location every time, so trying it again cannot change anything. Switch
-                // to /proxy, where api.launcherhub.net fetches the CDN itself and streams
-                // the bytes back, and the device never opens that second connection at
-                // all. If /proxy redirects too, there is nothing left to try.
-                if (!triedProxyFallback && activeUrl.indexOf("/download?") >= 0) {
-                    activeUrl.replace("/download?", "/proxy?");
-                    triedProxyFallback = true;
-                    launcherConsolePrintln("Redirect not followed, falling back to /proxy");
-                } else {
-                    break;
-                }
-            } else if (response.status >= 400) {
-                // Any other non-2xx that produced no data is a definitive answer
-                // (repeating it cannot change it), whether from /download or /proxy.
-                break;
-            }
-        }
-        launcherDelayMs(500);
-    }
+    RAM_LOG("flashRawRangeFromHttp-stream");
+    bool httpOk = launcherHttpGetStream(url.c_str(), launcherRawUpdateHttpCb, &update, &response, "HWID", hwid);
     bool complete = update.written == imageSize;
     bool endOk = complete && launcherRawUpdateEnd();
     bool ok = complete && endOk;
@@ -626,7 +610,9 @@ bool getInfo(const String &serverUrl, JsonDocument &_doc, JsonDocument *filter =
     for (uint8_t attempt = 0; attempt < maxAttempts; ++attempt) {
         String payload;
         LauncherHttpResponse resp;
+        launcherConsolePrintf("getInfo: GET attempt %u url_len=%u\n", attempt + 1, serverUrl.length());
         if (launcherHttpGetToString(serverUrl.c_str(), payload, 65536, &resp)) {
+            launcherConsolePrintf("getInfo: GET ok status=%d bytes=%u\n", resp.status, payload.length());
             _doc.clear();
             RAM_LOG("getInfo-before-parse");
             DeserializationError error =
@@ -652,6 +638,10 @@ bool getInfo(const String &serverUrl, JsonDocument &_doc, JsonDocument *filter =
         } else {
             reason = String("Net err ") + resp.transport_error;
         }
+        launcherConsolePrintf(
+            "getInfo: GET failed attempt=%u status=%d transport=%d\n", attempt + 1, resp.status,
+            resp.transport_error
+        );
         displayRedStripe(String("GET failed (") + (attempt + 1) + "/" + maxAttempts + "): " + reason);
 
         // The connection may have dropped mid-flow; abort early instead of burning
@@ -829,8 +819,8 @@ void installFirmwareFromManifest(const String &fid, const String &version, Strin
         return;
     }
 
+    String fileAddr = buildSourceUrl(fid, file, true);
     if (!file.startsWith("https://")) file = M5_SERVER_PATH + file;
-    String fileAddr = "https://api.launcherhub.net/download?fid=" + fid + "&file=" + file;
     if (fid == "") fileAddr = file;
 
     String manifestName = detail["name"].as<String>();
@@ -1109,7 +1099,9 @@ static bool padMergedFile(File &file, size_t &pos, size_t target) {
 static String buildSourceUrl(const String &fid, const String &sourceUrl, bool useProxy) {
     String url = sourceUrl;
     if (!url.startsWith("https://")) url = M5_SERVER_PATH + url;
-    if (useProxy && !fid.isEmpty()) url = "https://api.launcherhub.net/download?fid=" + fid + "&file=" + url;
+    if (useProxy && !fid.isEmpty()) {
+        url = String("https://api.launcherhub.net/download?fid=") + fid + "&file=" + url;
+    }
     return url;
 }
 
@@ -1283,6 +1275,7 @@ void downloadFirmware(
     bool autoAdvance
 ) {
     displayRedStripe("Preparing..");
+    RAM_LOG("downloadFirmware-start");
     String fileAddr = buildSourceUrl(fid, file_url, true);
     int tries = 0;
     fileName = replaceChars(fileName);
@@ -1339,9 +1332,17 @@ retry:
     LauncherHttpResponse response;
     prog_handler = 2;
     pauseInputHandlerTask();
+    RAM_LOG("downloadFirmware-before-httpGetStream");
     FileDownloadContext download = {&file, 0, 0, 0, &response};
-    bool ok = launcherHttpGetStream(
-        fileAddr.c_str(), fileDownloadCb, &download, &response, "HWID", launcherWifiMac().c_str()
+    String hwid = launcherWifiMac().c_str();
+    bool ok = launcherHttpGetStream(fileAddr.c_str(), fileDownloadCb, &download, &response, "HWID", hwid.c_str());
+    launcherConsolePrintf(
+        "downloadFirmware: ok=%d status=%d transport_error=%d content_length=%lld downloaded=%u\n",
+        (int)ok,
+        response.status,
+        response.transport_error,
+        (long long)response.content_length,
+        (unsigned)download.downloaded
     );
     file.flush();
     file.close();
@@ -1452,8 +1453,8 @@ void installFirmware(
     String fid, String file, uint32_t app_size, uint32_t app_offset, bool nb,
     std::vector<LauncherInstallDataPartition> &dataPartitions, String installedName
 ) {
+    String fileAddr = buildSourceUrl(fid, file, true);
     if (!file.startsWith("https://")) file = M5_SERVER_PATH + file;
-    String fileAddr = "https://api.launcherhub.net/download?fid=" + fid + "&file=" + file;
     if (fid == "") fileAddr = file;
 
     {
@@ -1504,10 +1505,10 @@ bool installFAT_OTA(String file, uint32_t offset, uint32_t size, const char *lab
         return false;
     }
 
-    RawHttpUpdateContext fatUpdate = {partition->address, partition->size, size, 0, false, false};
+    RawHttpUpdateContext fatUpdate = {partition->address, partition->size, offset, size, 0, false, false};
     displayRedStripe("Installing FAT");
     pauseInputHandlerTask();
-    bool ok = launcherHttpGetRange(file.c_str(), offset, size, launcherRawUpdateHttpCb, &fatUpdate) &&
+    bool ok = launcherHttpGetStream(file.c_str(), launcherRawUpdateHttpCb, &fatUpdate) &&
               fatUpdate.written == size && launcherRawUpdateEnd();
     resumeInputHandlerTask();
     if (ok) {
