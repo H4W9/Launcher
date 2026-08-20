@@ -104,7 +104,7 @@ bool getFlashSize(uint32_t &flashSize, String *error) {
         setError(error, "Could not detect flash size");
         return false;
     }
-    flashSize = detected;
+    flashSize = std::min(detected, (uint32_t)0x1000000); // clamp to 16MB — XMC chip can't address past this
     return true;
 }
 
