@@ -1,5 +1,8 @@
-# Name,     Type, SubType,   Offset,   Size,    Flags
-nvs,        data, nvs,       0x9000,   0x5000,
-otadata,    data, ota,       0xE000,   0x2000,
-app0,       app,  test,      0x10000,  0x180000,
-coredump,   data, coredump,  0x190000, 0x10000,
+# Name,     Type, SubType,   Offset,    Size,      Flags
+# --- everything below the 16MB (0x1000000) line must hold executable app code ---
+nvs,        data, nvs,       0x9000,    0x5000,
+otadata,    data, ota,       0xE000,    0x2000,
+app0,       app,  test,      0x10000,   0x400000,
+coredump,   data, coredump,  0x410000,  0x10000,
+# --- data-only region: FAT spans past 16MB via the C5's 32-bit flash addressing ---
+ffat,       data, fat,       0x420000,  0x1BE0000,
