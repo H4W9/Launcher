@@ -102,21 +102,20 @@ Things that need to be done in future updates
 * 2.9.0:
      * [x] Port to [T-Display P4](https://lilygo.cc/products/t-display-p4?bg_ref=sDI8Bh4HmO)
      * [x] Port to [T-Display C5](https://lilygo.cc/products/t-display-c5?bg_ref=sDI8Bh4HmO)
-     * [x] Port to [ES3C28P](https://www.lcdwiki.com/2.8inch_ESP32-S3_Display) aka `Cheap Black Display`, thanks to @AlexeOnTheShip
+     * [x] Port to [ESP32-S3 ES3C28P 2.8"](https://www.lcdwiki.com/2.8inch_ESP32-S3_Display) aka `Cheap Black Display`, thanks to @AlexeOnTheShip
      * [x] Port to [Elecrow Crowpanel Advance ESP32-S3 5.0in](https://www.elecrow.com/crowpanel-advance-5-0-hmi-esp32-ai-display-800x480-ips-artificial-intelligent-touch-screen.html)
      * [x] Port to [Elecrow Crowpanel Advance ESP32-P4 7.0in](https://www.elecrow.com/crowpanel-advanced-7inch-esp32-p4-hmi-ai-display-1024x600-ips-touch-screen-with-wifi-6-compatible-with-arduino-lvgl-micropython.html)
-     * [x] **BETA**: Port to XTeink X3, X4 and X4 Pro
-     * [x] **Wi-Fi over ESP-AT**: boards with a Wi-Fi co-processor (T-Display P4) are now probed at boot to detect whether the slave runs ESP-Hosted or the factory ESP-AT firmware, and the matching backend (scan, connect, HTTP/HTTPS, including ranged and streamed downloads) is selected automatically. No need to reflash the co-processor to use Launcher.
-     * [x] **USB Mass Storage on ESP32-P4**: boards wired to the high-speed OTG port (T-Display P4) are now supported alongside the full-speed ones (Tab5).
+     * [x] Port to [XTeink X3](https://www.xteink.com/products/xteink-x3)
+     * [x] **BETA**: Port to [XTeink X4 Pro](https://www.xteink.com/products/xteink-x4-pro-pocket-ereader) - Need validating touchscreen and display
+     * [x] **BETA**: Port to [SeeedStudio ReTerminal Sticky](https://www.seeedstudio.com/reTerminal-Sticky-p-6861.html)
+     * [x] **BETA**: Port to [ESP32 E32R40T 4"](https://www.lcdwiki.com/4.0inch_ESP32-32E_Display)
+     * [x] **ATENTION**: Arduino Nesso N1 and M5Stack StickS3 Navigation has changed, Front button short press to move Next and Long press to Select, Side button short press to mode Previous an long press to Escape.. on Keyboard, holding Escape will change the moviment from Left/Up to Right/Down, so typing will be easier to handle (after you master it).
+     * [x] Added option to opt-out from Automatically connect to a known Network.
      * [x] Moved display drivers handling to [DisplayDrivers](https://github.com/bmorcelli/DisplayDrivers) lib, using its superclass to handle all display drivers used by Launcher. This removed `tft.h`/`tft_inits.h` and the Arduino_GFX DSI patch scripts from the project.
      * [x] Reorganized boards files to make porting easier. It now needs only 2 files and add it to CI/CD. Per-board JSON files were replaced by one per chip family (`esp32`, `esp32s2`, `esp32s3`, `esp32c3`, `esp32c5`, `esp32c6`, `esp32p4`), and envs that only differ by pinout were merged (`m5stack-plus`, `lilygo-t-embed-all`, `xteink-x3-x4`).
      * [x] Removed `phy_init` partition and increased NVS to 0x5000
      * [x] Centralized NVS code handlers, and added a `nimble` compatibility layer between firmwares. Now older and newer versions of nimble_bonds are saved per device (it happens only when using BLE to connect to a device, creating bound data) and it is switched and restored when changing firmware in runtime. relate to this [issue](https://github.com/bmorcelli/Launcher/issues/400)
-     * [x] **NVS housekeeping**: installing a firmware now prunes app metadata left behind by partitions that no longer exist and resets the `nvs.net80211` namespace, avoiding stale data and NVS exhaustion.
-     * [x] **WebUI**: added an "Erase BLE Bonds" button to the NVS editor, blob/unsupported keys are now shown read-only instead of being corrupted on save, and the Config menu closes after picking an action.
-     * [x] UI fonts now scale with the display size instead of using fixed sizes, and display gamma is handled centrally by Settings for every board.
      * [x] Devices are now described by `HAS_2_BUTTONS`/`HAS_6_BUTTONS` and long-press navigation, replacing the old per-board button workarounds.
-     * [x] Saving settings no longer rewrites the whole Wi-Fi NVS namespace when the network list hasn't changed, cutting the delay reported on this [issue](https://github.com/bmorcelli/Launcher/issues/388)
      * [x] Fixed original M5Paper display and SD bus, thanks to @Decentricity
      * [x] Fixed Marauder v6.1 hypersensitive touch and SPI noise, thanks to @H4W9
      * [x] Fixed T-Display P4 install from SD Card and the SD/display bus conflict
@@ -144,6 +143,9 @@ Things that need to be done in future updates
      * [x] Fix WebUI OTA installation
      * [x] Added "dev" option to Reset Config and wifi credentials
 
+<details>
+  <summary><h2>Older Changelogs</h2></summary>
+
 * 2.7.2:
      * [x] Adjusted boot logic, now it works as it was before.
      * [x] Fixed devices that share TFT and Touch SPI bus (NM-CYD-C5 and others), that were unable to install firmware from SD Card.
@@ -166,9 +168,6 @@ Things that need to be done in future updates
      * [x] Port to [M5-DinMeter](https://shop.m5stack.com/products/m5stack-din-meter-w-m5stamps3?ref=Pirata)
      * [x] Port to [Arduino Nesso N1](https://docs.arduino.cc/hardware/nesso-n1)
      * [x] Port to [Reaper Board](https://www.elecrow.com/bruce-pcb-rf-reaper.html)
-
-<details>
-  <summary><h2>Older Changelogs</h2></summary>
 
 * 2.6.10:
      * [x] Fixed navigation on 3-button devices that were triggering EscPress when pressing Next or Prev buttons.

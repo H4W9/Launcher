@@ -64,7 +64,7 @@ volatile bool AnyKeyPress = false;
 LTouchPoint touchPoint;
 keyStroke KeyStroke;
 
-#if defined(HAS_TOUCH)
+#if defined(HAS_TOUCH) && !defined(HAS_TOUCH_NO_BORDER)
 volatile uint16_t tftHeight = TFT_WIDTH - (_fm * LH + 4);
 #else
 volatile uint16_t tftHeight = TFT_WIDTH;
@@ -117,6 +117,7 @@ bool autoBackup = true;
 bool returnToMenu;
 bool update;
 bool askSpiffs;
+bool autoConnect = true;
 
 // bool command;
 size_t file_size;
@@ -234,14 +235,14 @@ void setup() {
     tft->setTextColor(FGCOLOR, BGCOLOR);
 
     if (rotation & 0b1) {
-#if defined(HAS_TOUCH)
+#if defined(HAS_TOUCH) && !defined(HAS_TOUCH_NO_BORDER)
         tftHeight = displayConfig.width - (_fm * LH + 4);
 #else
         tftHeight = displayConfig.width;
 #endif
         tftWidth = displayConfig.height;
     } else {
-#if defined(HAS_TOUCH)
+#if defined(HAS_TOUCH) && !defined(HAS_TOUCH_NO_BORDER)
         tftHeight = displayConfig.height - (_fm * LH + 4);
 #else
         tftHeight = displayConfig.height;
@@ -266,7 +267,6 @@ void setup() {
     // Gets the config.conf from SD Card and fill out the settings JSON
     getConfigs();
     RAM_LOG("after-getConfigs");
-    TouchFooter2();
 
     launcherInputLockInit();
     xTaskCreate(
@@ -489,9 +489,9 @@ void loop() {
                 displayMsg("Dev mode Activated");
                 dev_mode = true;
                 saveConfigs();
+                first_loop = 1;
             }
-            drawMainMenu(menuItems, index);
-            TouchFooter();
+            drawMainMenu(menuItems, index, first_loop);
             redraw = false;
             LongPress = false;
             returnToMenu = false;
@@ -507,19 +507,18 @@ void loop() {
             for (auto item : menuItems) {
                 if (item.contain(touchPoint.x, touchPoint.y)) {
                     resetGlobals();
-#ifndef E_PAPER_DISPLAY
                     if (i == index) {
                         item.action();
                         tft->drawPixel(0, 0, 0);
                         tft->fillScreen(BGCOLOR);
+                        first_loop = true;
                     } else {
                         index = i;
-                        drawMainMenu(menuItems, index); // Redraw the menu to show the selected item
+                        // Just a selection move: only the old/new icon need repainting.
+                        drawMainMenu(menuItems, index, false);
                         break;
                     }
-#else
-                    item.action(); // Call the action associated with the selected menu item
-#endif
+
                     returnToMenu = false;
                     redraw = true;
                     goto END;

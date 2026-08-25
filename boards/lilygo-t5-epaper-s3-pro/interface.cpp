@@ -207,7 +207,7 @@ void InputHandler(void) {
     static unsigned long _tmptmp = 0;
     LTouchPointPro t;
     uint8_t touched = 0;
-    uint8_t rot = 5;
+    static uint8_t rot = 5;
     if (rot != rotation) {
         if (rotation == 1) {
             touch.setMaxCoordinates(960, 540);
@@ -232,7 +232,7 @@ void InputHandler(void) {
         rot = rotation;
     }
     touched = touch.getPoint(&t.x, &t.y, 1);
-    if ((launcherMillis() - _tmptmp) > 250 || LongPress) { // one reading each 500ms
+    if ((launcherMillis() - _tmptmp) > 200 || LongPress) { // one reading each 500ms
 
         // launcherConsolePrintf("\nPressed x=%d , y=%d, rot: %d",t.x, t.y, rotation);
         if (touched) {
@@ -252,6 +252,7 @@ void InputHandler(void) {
             touchPoint.pressed = true;
             touchHeatMap(touchPoint);
             touched = 0;
+            touch.reset();
         }
     }
 }
