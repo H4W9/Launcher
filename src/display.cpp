@@ -141,13 +141,11 @@ void initDisplay(bool doAll) {
 
 #ifdef E_PAPER_DISPLAY // epaper display draws only once
     static bool runOnce = false;
-    static long lastMillis = 0;
-    if (runOnce && launcherMillis() - lastMillis < 5000) {
+    if (runOnce) {
         vTaskDelay(50 / portTICK_PERIOD_MS);
         return;
     } else {
         runOnce = true;
-        lastMillis = launcherMillis();
     }
 #endif
 
@@ -438,7 +436,7 @@ void displayRedStripe(const String &text, uint16_t fgcolor, uint16_t bgcolor, bo
     tft->display(false);
 #if E_PAPER_DISPLAY
 #if defined(USE_M5GFX)
-    M5.Display.setEpdMode(epd_mode_t::epd_quality);
+    M5.Display.setEpdMode(epd_mode_t::epd_fast);
 #endif
 #endif
     // return previous tft settings
@@ -475,7 +473,6 @@ void displayMsg(String txt, bool waitKeyPress) { displayError(txt, waitKeyPress)
 ***************************************************************************************/
 void progressHandler(size_t progress, size_t total) {
     vTaskDelay(pdMS_TO_TICKS(2));
-    tft->drawPixel(0, 0, 0);
 #if defined(E_PAPER_DISPLAY)
     static unsigned long lastUpdate = 0;
 #endif
@@ -488,6 +485,7 @@ void progressHandler(size_t progress, size_t total) {
     if (progress == 0) {
         lastProgressDraw = launcherMillis();
         lastProgressBarWidth = 0;
+        tft->drawPixel(0, 0, 0);
         tft->setTextSize(_fm);
         tft->setTextColor(ALCOLOR);
         tft->fillRoundRect(6, 6, tftWidth - 12, tftHeight - 12, 5, BGCOLOR);
@@ -515,7 +513,7 @@ void progressHandler(size_t progress, size_t total) {
         lastProgressDraw = now;
         lastProgressBarWidth = barWidth;
     }
-
+    tft->drawPixel(0, 0, 0);
     if (prog_handler == 1) tft->fillRect(20, tftHeight - 26, barWidth, 13, ALCOLOR);
     else tft->fillRect(20, tftHeight - 45, barWidth, 13, FGCOLOR);
 
@@ -934,8 +932,13 @@ void drawMainMenu(std::vector<MenuOptions> &opt, int index, bool forceFullRedraw
 
         if (!fullRedraw && i != index && i != prevIndex) continue;
 
+#if defined(STICKY_MONOCHROME)
+        uint16_t itemColor = BLACK;
+        uint16_t selectedColor = BLACK;
+#else
         uint16_t itemColor = opt[i].active ? opt[i].color : DARKGREY;
         uint16_t selectedColor = opt[i].active ? opt[i].color : LIGHTGREY;
+#endif
         int f_size = maxIconTextSize;
         const int textLimit = w - 10;
         tft->setTextSize(f_size);
@@ -1281,7 +1284,7 @@ int loopOptions(std::vector<Option> &options, bool bright, uint16_t al, uint16_t
     }
 
 #if defined(E_PAPER_DISPLAY) && defined(USE_M5GFX)
-    M5.Display.setEpdMode(epd_mode_t::epd_quality);
+    M5.Display.setEpdMode(epd_mode_t::epd_fast);
 #endif
     return index;
 }

@@ -1,3 +1,4 @@
+#include "app_registry.h"
 #include "idf/launcher_platform.h"
 #include "powerSave.h"
 #include <M5GFX.h>
@@ -9,13 +10,37 @@
 #define DW_BTN 10
 
 void _setup_gpio() {
-    M5.begin();
+    M5.Display.setBrightness(0);
+    auto cfg = M5.config();
+    cfg.clear_display = false;
+    M5.begin(cfg);
     pinMode(SEL_BTN, INPUT); // Top button
     pinMode(UP_BTN, INPUT);  // upper button
     pinMode(DW_BTN, INPUT);  // down button
+
+    _cs = 47;
+    _sck = 15;
+    _miso = 14;
+    _mosi = 13;
 }
 
-void _post_setup_gpio() {}
+void _post_setup_gpio() {
+    tft->fillScreen(BGCOLOR);
+    tft->setTextSize(_fg);
+    tft->drawCentreString("LAUNCHER", TFT_WIDTH / 2, 200);
+    tft->setTextSize(_fm);
+    tft->drawCentreString("Press top Button", TFT_WIDTH / 2, 300);
+    tft->drawCentreString("to start Launcher", TFT_WIDTH / 2, 350);
+    tft->drawCentreString("WebUI", TFT_WIDTH / 2, 400);
+    if (bootToApp) {
+        String bootAppName = launcherSelectedBootAppName();
+        if (!bootAppName.isEmpty()) {
+            tft->drawCentreString("Booting into", TFT_WIDTH / 2, 460);
+            tft->drawCentreString(bootAppName, TFT_WIDTH / 2, 510);
+        }
+    }
+    tft->display();
+}
 
 int getBattery() {
     int percent;

@@ -66,6 +66,7 @@ static DeviceTouch touchCfg() {
     DeviceTouch cfg;
     cfg.pin_rst = TOUCH_RST;
     cfg.pin_irq = TOUCH_INT;
+    cfg.gt911_int_sync = true;
     return cfg;
 }
 
@@ -111,25 +112,33 @@ static uint8_t readTouchPoint(int16_t *x, int16_t *y) {
     LTouchPoint raw;
     if (!hal_touch_read_raw(raw)) return 0;
 
+    // The sensor is mounted portrait (480x800). Map the raw point into the
+    // portrait frame (rotation 3) first, then turn it into the other three
+    // rotations with the same 90-degree steps GxEPD2 uses for the framebuffer.
+    // 触摸传感器按竖屏(480x800)安装：先算出竖屏(rotation 3)坐标，
+    // 再按屏幕库相同的 90 度旋转步骤推出其余三个方向。
     const uint16_t rawX = (uint16_t)raw.x;
-    const uint16_t rawY = (uint16_t)raw.y;
+    const uint16_t rawY = (uint16_t)raw.y > touchNativeHeight ? touchNativeHeight : (uint16_t)raw.y;
+    const int16_t px = scaleTouchCoordinate(rawX, touchNativeWidth, TFT_HEIGHT - 1);
+    const int16_t py = scaleTouchCoordinate(touchNativeHeight - rawY, touchNativeHeight, TFT_WIDTH - 1);
 
-    if (rotation == 3) {
-        *x = scaleTouchCoordinate(rawX, touchNativeWidth, TFT_HEIGHT - 1);
-        *y = scaleTouchCoordinate(
-            touchNativeHeight - (rawY > touchNativeHeight ? touchNativeHeight : rawY),
-            touchNativeHeight,
-            TFT_WIDTH - 1
-        );
-    } else if (rotation == 1) {
-        *x = (TFT_HEIGHT - 1) - scaleTouchCoordinate(rawX, touchNativeWidth, TFT_HEIGHT - 1);
-        *y = scaleTouchCoordinate(rawY, touchNativeHeight, TFT_WIDTH - 1);
-    } else if (rotation == 0) {
-        *x = scaleTouchCoordinate(rawY, touchNativeHeight, TFT_WIDTH - 1);
-        *y = scaleTouchCoordinate(rawX, touchNativeWidth, TFT_HEIGHT - 1);
-    } else {
-        *x = (TFT_WIDTH - 1) - scaleTouchCoordinate(rawY, touchNativeHeight, TFT_WIDTH - 1);
-        *y = (TFT_HEIGHT - 1) - scaleTouchCoordinate(rawX, touchNativeWidth, TFT_HEIGHT - 1);
+    switch (rotation) {
+        case 0:
+            *x = py;
+            *y = (TFT_HEIGHT - 1) - px;
+            break;
+        case 1:
+            *x = (TFT_HEIGHT - 1) - px;
+            *y = (TFT_WIDTH - 1) - py;
+            break;
+        case 2:
+            *x = (TFT_WIDTH - 1) - py;
+            *y = px;
+            break;
+        default:
+            *x = px;
+            *y = py;
+            break;
     }
     return 1;
 }
@@ -157,20 +166,51 @@ void _setup_gpio() {
 
     powerOnHold();
 
+    // Release any RTC GPIO hold left over from a deep sleep entered by a
+    // launched app (e.g. an e-paper app that calls gpio_hold_en()/
+    // gpio_deep_sleep_hold_en() on these pins to keep rails/reset lines
+    // fixed while asleep, then wakes via reset back into the launcher).
+    // gpio_reset_pin() below does NOT clear a hold latch by itself -- an
+    // unreleased hold silently discards every write this function makes,
+    // which is what "display never powers, GT911 never answers" looks
+    // like after returning from such an app.
+    gpio_hold_dis((gpio_num_t)TOUCH_EN);
+    gpio_hold_dis((gpio_num_t)TOUCH_RST);
+    gpio_hold_dis((gpio_num_t)TOUCH_INT);
+    gpio_hold_dis((gpio_num_t)SD_PWR_EN);
+    gpio_hold_dis((gpio_num_t)EPD_EN);
+    gpio_hold_dis((gpio_num_t)BAT_CHG_EN);
+    gpio_deep_sleep_hold_dis();
+
     // Powered up here, well ahead of the first setupSdCard() call later in
     // boot, so the confirmed 100ms settle time is already spent by then.
+    gpio_reset_pin((gpio_num_t)TOUCH_INT);
+    gpio_reset_pin((gpio_num_t)TOUCH_EN);
+    gpio_reset_pin((gpio_num_t)SD_PWR_EN);
+    gpio_reset_pin((gpio_num_t)EPD_EN);
+    gpio_reset_pin((gpio_num_t)BAT_CHG_EN);
     launcherGpioOutput(TOUCH_EN);
-    launcherGpioWrite(TOUCH_EN, HIGH);
     launcherGpioOutput(SD_PWR_EN);
-    launcherGpioWrite(SD_PWR_EN, HIGH);
     launcherGpioOutput(EPD_EN);
-    launcherGpioWrite(EPD_EN, HIGH);
     launcherGpioOutput(BAT_CHG_EN);
+    launcherGpioOutput(TFT_CS);
+    launcherGpioOutput(SDCARD_CS);
+
+    launcherGpioOutput(TOUCH_INT);
+    launcherGpioWrite(TOUCH_INT, LOW);
+
+    launcherGpioWrite(TOUCH_EN, LOW);
+    launcherGpioWrite(SD_PWR_EN, LOW);
+    launcherGpioWrite(EPD_EN, LOW);
+    launcherGpioWrite(BAT_CHG_EN, HIGH);
+    launcherDelayMs(100); // Wait for 3.3V rails to settle before touching the bus
+
+    launcherGpioWrite(TOUCH_EN, HIGH);
+    launcherGpioWrite(SD_PWR_EN, HIGH);
+    launcherGpioWrite(EPD_EN, HIGH);
     launcherGpioWrite(BAT_CHG_EN, LOW); // Active low; left undriven the charger stays disabled.
     // Drive CS Pins High
-    launcherGpioOutput(TFT_CS);
     launcherGpioWrite(TFT_CS, HIGH);
-    launcherGpioOutput(SDCARD_CS);
     launcherGpioWrite(SDCARD_CS, HIGH);
 
     // Setup Inputs
@@ -249,6 +289,19 @@ void InputHandler(void) {
         t.pressed = true;
         hal_touch_apply(t);
     }
+}
+
+/***************************************************************************************
+** Function name: reboot()
+** Description:   Power-cycles the microSD rail before the CPU resets, so the
+**                firmware being launched finds the card in its power-on state.
+**                重启 CPU 前先给 microSD 断电，让被启动的固件拿到一张刚上电的卡。
+***************************************************************************************/
+void reboot() {
+    launcherGpioWrite(SDCARD_CS, HIGH);
+    launcherGpioWrite(SD_PWR_EN, LOW);
+    launcherDelayMs(200);
+    ESP.restart();
 }
 
 void powerOff() {
